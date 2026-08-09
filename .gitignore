@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+
+*.pt
+*.pth
+*.ckpt
+
+/kaggle/
+/outputs/
+/checkpoints/
+
+.env
