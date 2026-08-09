@@ -6,7 +6,7 @@ import train
 
 model = gpt.build_transformer(
     vocab_size=30000,
-    seq_len=256
+    seq_len=128
 )
 checkpoint = torch.load(
     "latest.pt",
@@ -31,7 +31,7 @@ def generate(
     model.eval()
 
     for _ in range(max_new_tokens):
-        input_ids = ids[-256:]
+        input_ids = ids[-128:]
 
         x = torch.tensor(
             input_ids,
