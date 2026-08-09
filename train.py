@@ -32,7 +32,7 @@ if __name__ == "__main__":
         seq_len=seq_len
     ).to(device)
     checkpoint = torch.load(
-    "latest.pt",
+    "/kaggle/input/datasets/preetsidhu20/training-checkpoints/latest.pt",
     map_location="cpu"
     )
 
