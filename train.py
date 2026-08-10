@@ -54,7 +54,7 @@ if __name__ == "__main__":
     model = torch.compile(model)
 
     checkpoint = torch.load(
-    "/kaggle/input/datasets/preetsidhu20/training-checkpoints/latest.pt",
+    "/kaggle/input/datasets/preetsidhu20/transformer-checkpoints/latest.pt",
     map_location="cpu"
     )
 
