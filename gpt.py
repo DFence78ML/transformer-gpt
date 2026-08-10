@@ -103,10 +103,9 @@ class ResidualConnection(nn.Module):
         return x + self.dropout(sublayer(self.norm(x)))
 
 class DecoderBlock(nn.Module):
-    def __init__(self, self_attention_block: MultiHeadAttentionBlock, cross_attention_block: MultiHeadAttentionBlock, feed_forward_block: FeedForwardBlock, dropout: float, d_model):
+    def __init__(self, self_attention_block: MultiHeadAttentionBlock, feed_forward_block: FeedForwardBlock, dropout: float, d_model):
         super().__init__()
         self.self_attention_block =  self_attention_block
-        self.cross_attention_block = cross_attention_block
         self.feed_forward_block = feed_forward_block
         self.residual_connections = nn.ModuleList([ResidualConnection(dropout, d_model) for _ in range(2)])
 
@@ -159,9 +158,8 @@ def build_transformer(vocab_size: int, seq_len: int, d_model: int=512, N: int=6,
     decoder_blocks = []
     for _ in range(N):
         decoder_self_attention_block = MultiHeadAttentionBlock(d_model, h, dropout)
-        decoder_cross_attention_block = MultiHeadAttentionBlock(d_model, h, dropout)
         feed_forward_block = FeedForwardBlock(d_model, d_ff, dropout)
-        decoder_block = DecoderBlock(decoder_self_attention_block, decoder_cross_attention_block, feed_forward_block, dropout, d_model)
+        decoder_block = DecoderBlock(decoder_self_attention_block, feed_forward_block, dropout, d_model)
         decoder_blocks.append(decoder_block)
     
     decoder = Decoder(nn.ModuleList(decoder_blocks), d_model)

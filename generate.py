@@ -4,8 +4,10 @@ import dataset
 import gpt
 import train
 
+vocab_size = dataset.tokenizer.get_vocab_size()
+
 model = gpt.build_transformer(
-    vocab_size=30000,
+    vocab_size=vocab_size,
     seq_len=128
 )
 checkpoint = torch.load(

@@ -41,13 +41,13 @@ if __name__ == "__main__":
             pin_memory=True
         )
 
-    torch.set_num_threads(torch.get_num_threads())
-
     device = "cuda" if torch.cuda.is_available() else "cpu"
     scaler = torch.amp.GradScaler("cuda" if torch.cuda.is_available() else "cpu")
 
+    vocab_size = dataset.tokenizer.get_vocab_size()
+
     model = gpt.build_transformer(
-        vocab_size=30000,
+        vocab_size=vocab_size,
         seq_len=seq_len
     ).to(device)
 
@@ -77,13 +77,14 @@ if __name__ == "__main__":
 
     model = torch.compile(model)
 
-    def validate(model, val_loader, criterion, device, mask):
+    def validate(model, val_loader, criterion, device, mask, max_batches=100):
         model.eval()
-
         total_loss = 0
 
         with torch.no_grad():
-            for x, y in val_loader:
+            for i, (x, y) in enumerate(val_loader):
+                if i >= max_batches:
+                    break
 
                 x = x.to(device, non_blocking=True)
                 y = y.to(device, non_blocking=True)
@@ -99,12 +100,11 @@ if __name__ == "__main__":
 
         model.train()
 
-        return total_loss / len(val_loader)
+        return total_loss / min(len(val_loader), max_batches)
 
     for epoch in range(start_epoch,10):
         total_loss = 0
         model.train()
-        print(checkpoint["epoch"])
         print(epoch)
         mask = gpt.create_causal_mask(
         seq_len
@@ -112,7 +112,7 @@ if __name__ == "__main__":
         for x, y in train_loader:
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
-            optimizer.zero_grad(set_to_none=False)
+            optimizer.zero_grad(set_to_none=True)
             with torch.amp.autocast("cuda"):
                 logits = model(x, mask)
                 loss = criterion(
