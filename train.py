@@ -26,7 +26,7 @@ if __name__ == "__main__":
 
     train_loader = DataLoader(
         traindataset,
-        batch_size=256,
+        batch_size=128,
         shuffle=True,
         num_workers=4,
         persistent_workers=True,
@@ -34,7 +34,7 @@ if __name__ == "__main__":
     )
     val_loader = DataLoader(
             valdataset,
-            batch_size=256,
+            batch_size=128,
             shuffle=False,
             num_workers=4,
             persistent_workers=True,
