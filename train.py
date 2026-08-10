@@ -28,7 +28,7 @@ if __name__ == "__main__":
         traindataset,
         batch_size=1024,
         shuffle=True,
-        num_workers=6,
+        num_workers=4,
         persistent_workers=True,
         pin_memory=True
     )
@@ -36,7 +36,7 @@ if __name__ == "__main__":
             valdataset,
             batch_size=1024,
             shuffle=False,
-            num_workers=6,
+            num_workers=4,
             persistent_workers=True,
             pin_memory=True
         )
@@ -50,8 +50,6 @@ if __name__ == "__main__":
         vocab_size=30000,
         seq_len=seq_len
     ).to(device)
-
-    model = torch.compile(model)
 
     checkpoint = torch.load(
     "/kaggle/input/datasets/preetsidhu20/transformer-checkpoints/latest.pt",
@@ -76,6 +74,8 @@ if __name__ == "__main__":
     criterion = nn.CrossEntropyLoss()
 
     start_epoch = checkpoint["epoch"] + 1
+
+    model = torch.compile(model)
 
     def validate(model, val_loader, criterion, device, mask):
         model.eval()
