@@ -11,8 +11,8 @@ model = gpt.build_transformer(
     seq_len=128
 )
 checkpoint = torch.load(
-    "latest.pt",
-    map_location="cuda" if torch.cuda.is_available() else "cpu"
+    "best.pt",
+    map_location="cpu"
 )
 model.load_state_dict(
     checkpoint["model_state_dict"]
