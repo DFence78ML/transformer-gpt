@@ -2,6 +2,7 @@ import dataset
 import gpt
 import torch
 import torch.nn as nn
+import sys
 
 from torch.utils.data import DataLoader
 
@@ -56,7 +57,7 @@ if __name__ == "__main__":
         lr=3e-4
     )
 
-    load = input("Load which training.pt? (no,latest,best)").strip().lower()
+    load = sys.argv[1].lower() if len(sys.argv) > 1 else "no"
 
     if load == "no":
         best_val_loss = float("inf")
