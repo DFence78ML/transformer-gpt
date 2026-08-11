@@ -51,29 +51,54 @@ if __name__ == "__main__":
         seq_len=seq_len
     ).to(device)
 
-    checkpoint = torch.load(
-    "/kaggle/input/datasets/preetsidhu20/transformer-checkpoints/latest.pt",
-    map_location="cpu"
-    )
-
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=3e-4
     )
-    optimizer.load_state_dict(
-    checkpoint["optimizer_state_dict"]
-    )      
 
-    for state in optimizer.state.values():
-        for key, value in state.items():
-            if torch.is_tensor(value):
-                state[key] = value.to(device)
+    load = input("Load which training.pt? (no,latest,best)").strip().lower()
 
-    model.load_state_dict(checkpoint["model_state_dict"]) 
+    if load == "no":
+        best_val_loss = float("inf")
+        start_epoch = 0
+        patience_counter = 0
+        pass
+    else:
+        if load == "latest":
+            checkpoint = torch.load(
+            "/kaggle/input/datasets/preetsidhu20/transformer-checkpoints/latest.pt",
+            map_location="cpu"
+            )
+        else:
+            checkpoint = torch.load(
+                "/kaggle/input/datasets/preetsidhu20/transformer-checkpoints/best.pt",
+                map_location="cpu"
+            )
 
-    criterion = nn.CrossEntropyLoss()
+        optimizer.load_state_dict(
+        checkpoint["optimizer_state_dict"]
+        )      
 
-    start_epoch = checkpoint["epoch"] + 1
+        for state in optimizer.state.values():
+            for key, value in state.items():
+                if torch.is_tensor(value):
+                    state[key] = value.to(device)
+
+        model.load_state_dict(checkpoint["model_state_dict"]) 
+
+        start_epoch = checkpoint["epoch"] + 1
+
+        best_val_loss = checkpoint.get(
+            "best_val_loss",
+            float("inf")
+        )
+
+        patience_counter = checkpoint.get(
+            "patience_counter",
+            0
+        )
+
+    criterion = nn.CrossEntropyLoss() 
 
     model = torch.compile(model)
 
@@ -101,14 +126,16 @@ if __name__ == "__main__":
         model.train()
 
         return total_loss / min(len(val_loader), max_batches)
+    mask = gpt.create_causal_mask(
+        seq_len
+    ).to(device)
+
+    patience = 3
 
     for epoch in range(start_epoch,10):
         total_loss = 0
         model.train()
         print(epoch)
-        mask = gpt.create_causal_mask(
-        seq_len
-                ).to(device)
         for x, y in train_loader:
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
@@ -141,13 +168,46 @@ if __name__ == "__main__":
             f"Train Loss: {train_loss:.4f} | "
             f"Val Loss: {val_loss:.4f}"
         )
-        torch.save({
+
+        is_best = val_loss < best_val_loss
+
+        if is_best:
+            best_val_loss = val_loss
+            patience_counter = 0
+        else:
+            patience_counter += 1
+            print(f"Patience{patience_counter}:{patience}")
+
+        checkpoint = {
             "epoch": epoch,
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
-        }, f"/kaggle/working/checkpoint_{epoch}.pt")
-        torch.save({
-                    "epoch": epoch,
-                    "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                }, f"/kaggle/working/latest.pt")
+            "patience_counter": patience_counter,
+            "best_val_loss": best_val_loss,
+        }
+
+        torch.save(
+            checkpoint,
+            "/kaggle/working/latest.pt"
+        )
+
+        torch.save(
+            checkpoint,
+            f"/kaggle/working/checkpoint_{epoch}.pt"
+        )
+
+        if is_best:
+            torch.save(
+                checkpoint,
+                "/kaggle/working/best.pt"
+            )
+
+        if patience_counter >= patience:
+            print(
+                f"\nEarly stopping!"
+            )
+            print(
+                f"Best validation loss: "
+                f"{best_val_loss:.4f}"
+            )
+            break
