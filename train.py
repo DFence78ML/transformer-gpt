@@ -101,6 +101,8 @@ if __name__ == "__main__":
 
     criterion = nn.CrossEntropyLoss() 
 
+    raw_model = model
+
     model = torch.compile(model)
 
     def validate(model, val_loader, criterion, device, mask, max_batches=100):
@@ -181,7 +183,7 @@ if __name__ == "__main__":
 
         checkpoint = {
             "epoch": epoch,
-            "model_state_dict": model.state_dict(),
+            "model_state_dict": raw_model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "patience_counter": patience_counter,
             "best_val_loss": best_val_loss,
