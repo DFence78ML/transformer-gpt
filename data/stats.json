@@ -1,0 +1,7 @@
+{
+    "train_documents": 2013566,
+    "validation_documents": 105910,
+    "train_characters": 1795104307,
+    "validation_characters": 94483473,
+    "total_characters": 1889587780
+}

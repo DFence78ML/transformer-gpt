@@ -6,22 +6,15 @@ import sys
 
 from torch.utils.data import DataLoader
 
-text = open("data/input.txt", encoding="utf8").read()
-split = int(0.8 * len(text))
-train_text = text[:split]
-val_text = text[split:]
-
 if __name__ == "__main__":
     seq_len=128
     traindataset = dataset.GPTDataset(
-        train_text,
-        dataset.tokenizer,
+        "data/processed/train.bin",
         seq_len
     )
 
     valdataset = dataset.GPTDataset(
-            val_text,
-            dataset.tokenizer,
+            "data/processed/val.bin".
             seq_len
         )
 
@@ -151,6 +144,10 @@ if __name__ == "__main__":
                 )
 
             scaler.scale(loss).backward()
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                1.0
+            )
             scaler.step(optimizer)
             scaler.update()
 
