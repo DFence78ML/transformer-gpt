@@ -206,16 +206,47 @@ def create_causal_mask(size):
 if __name__ == "__main__":
 
     d_model = 512
-    vocab_size = 30000
+    vocab_size = 32000
     heads = 8
     batch_size = 2
-    seq_len = 128
+    seq_len = 32
     d_k = 64
+    epochs = 300
 
-    x = torch.randn(
-        batch_size,
-        seq_len,
-        d_model
+    x = torch.randint(
+        0,
+        vocab_size,
+        (batch_size,seq_len)
     )
+    targets = torch.randint(
+            0,
+            vocab_size,
+            (batch_size, seq_len)
+        )
+    targets = targets.reshape(-1)
 
     tran = build_transformer(vocab_size,seq_len)
+    mask = create_causal_mask(seq_len)
+    total_loss = 0
+    
+    optimizer = torch.optim.AdamW(
+            tran.parameters(),
+            1e-3
+        )
+    criterion = nn.CrossEntropyLoss()
+    for i in range(epochs):
+        tran.train()
+        optimizer.zero_grad()
+        y = tran(x,mask)
+        logits = y.reshape(
+            -1,
+            y.size(-1)
+        )
+        loss = criterion(logits,targets)
+        loss.backward()
+
+        optimizer.step()
+        total_loss = loss.item()
+        if (i%10 == 0):
+            print(f"Epoch: {i}  //  Loss: {total_loss}")
+

@@ -18,42 +18,53 @@ tokenizer = Tokenizer.from_file(
 )
 
 
-def tokenize_file(
-    input_file,
-    output_file
-):
+def tokenize_file(input_file, output_file):
 
-    print(
-        f"Tokenizing {input_file}"
-    )
+    print(f"Tokenizing {input_file}")
 
-    text = Path(
-        input_file
-    ).read_text(
+    total_tokens = 0
+
+    with open(
+        input_file,
+        "r",
         encoding="utf-8"
-    )
+    ) as f:
 
-    ids = tokenizer.encode(
-        text
-    ).ids
+        with open(
+            output_file,
+            "wb"
+        ) as out:
 
+            while True:
+                lines = []
+                for _ in range(1000):
+                    line = f.readline()
+                    if not line:
+                        break
+                    lines.append(line)
+                if not lines:
+                    break
+
+                encoded = tokenizer.encode_batch(
+                    lines
+                )
+                ids = []
+
+                for item in encoded:
+                    ids.extend(item.ids)
+
+                array = np.asarray(
+                    ids,
+                    dtype=np.uint16
+                )
+                array.tofile(out)
+                total_tokens += len(ids)
     print(
-        f"Tokens: {len(ids):,}"
+        f"Tokens: {total_tokens:,}"
     )
-
-    array = np.array(
-        ids,
-        dtype=np.uint16
-    )
-
-    array.tofile(
-        output_file
-    )
-
     print(
         f"Saved {output_file}"
     )
-
 
 tokenize_file(
     TRAIN_FILE,

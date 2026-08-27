@@ -1,14 +1,16 @@
 import numpy as np
 import torch
+from tokenizers import Tokenizer
 from torch.utils.data import Dataset
 
 
+TOKENIZER_FILE = "tokenizer.json"
+tokenizer = Tokenizer.from_file(
+            TOKENIZER_FILE
+            )
+
 class GPTDataset(Dataset):
-    def __init__(
-        self,
-        filename,
-        seq_len
-    ):
+    def __init__(self,filename,seq_len):
         self.data = np.memmap(
             filename,
             dtype=np.uint16,

@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import sys
 import math
+import time
 
 from torch.utils.data import DataLoader
 
@@ -15,9 +16,7 @@ GRAD_ACCUM_STEPS = 8
 MAX_EPOCHS = 10
 
 MAX_LR = 3e-4
-MIN_LR = 3e-5
-
-WARMUP_STEPS = 500
+MIN_LR = 3e-5 
 
 WEIGHT_DECAY = 0.1
 GRAD_CLIP = 1.0
@@ -25,6 +24,7 @@ GRAD_CLIP = 1.0
 PATIENCE = 3
 
 tokens_seen = 0
+epoch_tokens = 0
 
 NUM_WORKERS = 4
 
@@ -108,12 +108,12 @@ def validate(
 
 if __name__ == "__main__":
     traindataset = dataset.GPTDataset(
-        "data/processed/train.bin",
+        "/kaggle/input/datasets/preetsidhu20/tokenized-files/train.bin",
         SEQ_LEN
     )
 
     valdataset = dataset.GPTDataset(
-        "data/processed/val.bin",
+        "/kaggle/input/datasets/preetsidhu20/tokenized-files/val.bin",
         SEQ_LEN
     )
 
@@ -193,6 +193,18 @@ if __name__ == "__main__":
         SEQ_LEN
     )
 
+    optimizer_steps_per_epoch = math.ceil(
+        len(train_loader) /
+        GRAD_ACCUM_STEPS
+    )
+
+    total_optimizer_steps = (
+        optimizer_steps_per_epoch *
+        MAX_EPOCHS
+    )
+
+    WARMUP_STEPS = int(total_optimizer_steps * 0.01)
+
     print()
     print("Training configuration")
     print("----------------------")
@@ -212,16 +224,6 @@ if __name__ == "__main__":
         lr=MAX_LR,
         betas=(0.9, 0.95),
         weight_decay=WEIGHT_DECAY
-    )
-
-    optimizer_steps_per_epoch = math.ceil(
-        len(train_loader) /
-        GRAD_ACCUM_STEPS
-    )
-
-    total_optimizer_steps = (
-        optimizer_steps_per_epoch *
-        MAX_EPOCHS
     )
 
     print()
@@ -341,8 +343,11 @@ if __name__ == "__main__":
     ):
 
         model.train()
+        epoch_tokens = 0
+        batch_tokens = 0
 
         total_loss = 0.0
+        start_time = time.time()
         optimizer.zero_grad(
             set_to_none=True
         )
@@ -367,7 +372,9 @@ if __name__ == "__main__":
                 non_blocking=True
             )
 
-            tokens_seen += (x.size(0) * x.size(1))
+            batch_tokens = (x.size(0) * x.size(1))
+            epoch_tokens += batch_tokens
+            tokens_seen += batch_tokens
 
             with torch.amp.autocast(
                 device_type=device,
@@ -386,17 +393,19 @@ if __name__ == "__main__":
                     ),
                     y.reshape(-1)
                 )
+                logging_loss = loss.item()
                 loss = (
                     loss /
                     GRAD_ACCUM_STEPS
                 )
+
 
             scaler.scale(
                 loss
             ).backward()
 
 
-            total_loss += loss.item()
+            total_loss += logging_loss
 
             is_update_step = (
                 (batch_idx + 1)
@@ -418,6 +427,17 @@ if __name__ == "__main__":
                     model.parameters(),
                     GRAD_CLIP
                 )
+
+                lr = get_lr(
+                    global_step,
+                    total_optimizer_steps
+                )
+                for param_group in (
+                    optimizer.param_groups
+                ):
+
+                    param_group["lr"] = lr
+
                 scaler.step(
                     optimizer
                 )
@@ -428,19 +448,6 @@ if __name__ == "__main__":
                 optimizer.zero_grad(
                     set_to_none=True
                 )
-
-                lr = get_lr(
-                    global_step,
-                    total_optimizer_steps
-                )
-
-                for param_group in (
-                    optimizer.param_groups
-                ):
-
-                    param_group["lr"] = lr
-
-
                 global_step += 1
 
                 if global_step % 100 == 0:
@@ -454,6 +461,8 @@ if __name__ == "__main__":
             total_loss /
             len(train_loader)
         )
+        elapsed = time.time() - start_time
+        tokens_per_sec = int(epoch_tokens / elapsed)
 
         val_loss = validate(
             model,
@@ -474,7 +483,9 @@ if __name__ == "__main__":
             f"Train Loss: {train_loss:.4f} | "
             f"Val Loss: {val_loss:.4f} | "
             f"Perplexity: {perplexity:.2f}"
-            f"Tokens seen: {tokens_seen}"
+            f"Tokens seen this epoch: {epoch_tokens}"
+            f"Tokens per sec: {tokens_per_sec}"
+            f"Total tokens seen: {tokens_seen}"
         )
 
         is_best = (

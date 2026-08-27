@@ -8,9 +8,8 @@ tokenizer = Tokenizer(BPE(unk_token="[UNK]"))
 tokenizer.pre_tokenizer = ByteLevel()
 
 trainer = BpeTrainer(
-    vocab_size=8000,
+    vocab_size=32000,
     special_tokens=[
-        "[PAD]",
         "[UNK]",
         "[BOS]",
         "[EOS]",
