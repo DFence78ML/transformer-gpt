@@ -10,8 +10,8 @@ from torch.utils.data import DataLoader
 
 SEQ_LEN = 128
 
-BATCH_SIZE = 128
-GRAD_ACCUM_STEPS = 8
+BATCH_SIZE = 256
+GRAD_ACCUM_STEPS = 4
 
 MAX_EPOCHS = 3
 STRIDE = 128
@@ -452,12 +452,14 @@ if __name__ == "__main__":
                     set_to_none=True
                 )
                 global_step += 1
+                elapsed = time.time() - start_time
 
                 if global_step % 100 == 0:
 
                     print(
                         f"Step {global_step:,} | "
                         f"LR {lr:.2e}"
+                        f"Time: {elapsed}"
                     )
 
         train_loss = (
