@@ -10,8 +10,8 @@ from torch.utils.data import DataLoader
 
 SEQ_LEN = 128
 
-BATCH_SIZE = 256
-GRAD_ACCUM_STEPS = 4
+BATCH_SIZE = 128
+GRAD_ACCUM_STEPS = 8
 
 MAX_EPOCHS = 3
 STRIDE = 128
@@ -27,7 +27,7 @@ PATIENCE = 3
 tokens_seen = 0
 epoch_tokens = 0
 
-NUM_WORKERS = 4
+NUM_WORKERS = 8
 
 def get_lr(step, total_steps):
 
@@ -453,6 +453,7 @@ if __name__ == "__main__":
                 )
                 global_step += 1
                 elapsed = time.time() - start_time
+                tokens_per_sec = int(epoch_tokens / elapsed)
 
                 if global_step % 100 == 0:
 
@@ -460,6 +461,7 @@ if __name__ == "__main__":
                         f"Step {global_step:,} | "
                         f"LR {lr:.2e}"
                         f"Time: {elapsed}"
+                        f"Tokens per sec {tokens_per_sec}"
                     )
 
         train_loss = (
@@ -467,7 +469,6 @@ if __name__ == "__main__":
             len(train_loader)
         )
         elapsed = time.time() - start_time
-        tokens_per_sec = int(epoch_tokens / elapsed)
 
         val_loss = validate(
             model,
