@@ -13,7 +13,8 @@ SEQ_LEN = 128
 BATCH_SIZE = 128
 GRAD_ACCUM_STEPS = 8
 
-MAX_EPOCHS = 10
+MAX_EPOCHS = 3
+STRIDE = 128
 
 MAX_LR = 3e-4
 MIN_LR = 3e-5 
@@ -109,12 +110,14 @@ def validate(
 if __name__ == "__main__":
     traindataset = dataset.GPTDataset(
         "/kaggle/input/datasets/preetsidhu20/tokenized-files/train.bin",
-        SEQ_LEN
+        SEQ_LEN,
+        STRIDE
     )
 
     valdataset = dataset.GPTDataset(
         "/kaggle/input/datasets/preetsidhu20/tokenized-files/val.bin",
-        SEQ_LEN
+        SEQ_LEN,
+        STRIDE
     )
 
     train_loader = DataLoader(

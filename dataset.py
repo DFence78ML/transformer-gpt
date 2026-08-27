@@ -10,23 +10,20 @@ tokenizer = Tokenizer.from_file(
             )
 
 class GPTDataset(Dataset):
-    def __init__(self,filename,seq_len):
+    def __init__(self,filename,seq_len, stride):
         self.data = np.memmap(
             filename,
             dtype=np.uint16,
             mode="r"
         )
         self.seq_len = seq_len
+        self.stride = stride
 
     def __len__(self):
-        return len(
-            self.data
-        ) - self.seq_len
+        return (len(self.data) - self.seq_len) // self.stride
 
     def __getitem__(self, idx):
-        chunk = self.data[
-            idx:idx + self.seq_len + 1
-        ]
+        chunk = self.data[idx * self.stride:(idx*self.stride) + self.seq_len + 1]
         chunk = torch.from_numpy(
             chunk.astype(np.int64)
         )
