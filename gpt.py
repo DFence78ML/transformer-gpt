@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-import math
+import config
 
 class InputEmbeddings(nn.Module):
     def __init__(self, d_model: int, vocab_size: int):
@@ -39,26 +39,28 @@ class RoPE(nn.Module):
         self.register_buffer("cos_angles", cos_angles)
         self.register_buffer("sin_angles", sin_angles)
 
-    def forward(self,x):
+    def forward(self, x):
+        batch, heads, seq_len, d_k = x.shape
         x_pairs = x.view(
-            x.shape[0],
-            x.shape[1],
-            x.shape[2],
-            self.d_k//2,
+            batch,
+            heads,
+            seq_len,
+            d_k // 2,
             2
         )
-        cos_squeeze = torch.unsqueeze(self.cos_angles,0).unsqueeze(0)
-        sin_squeeze = torch.unsqueeze(self.sin_angles,0).unsqueeze(0)
 
-        x0 = x_pairs[:,:,:,:,0]
-        x1 = x_pairs[:,:,:,:,1]
+        cos_squeeze = self.cos_angles[:seq_len].unsqueeze(0).unsqueeze(0)
+        sin_squeeze = self.sin_angles[:seq_len].unsqueeze(0).unsqueeze(0)
+
+        x0 = x_pairs[..., 0]
+        x1 = x_pairs[..., 1]
 
         new_x0 = (cos_squeeze * x0) - (sin_squeeze * x1)
         new_x1 = (cos_squeeze * x1) + (sin_squeeze * x0)
 
-        combine = torch.stack([new_x0, new_x1], -1)
+        combine = torch.stack([new_x0, new_x1], dim=-1)
 
-        return combine.view(*x.shape)
+        return combine.reshape(batch, heads, seq_len, d_k)
     
 class MultiHeadAttentionBlock(nn.Module):
     def __init__(self, d_model: int, h: int, dropout: float, seq_len: int):
@@ -78,19 +80,27 @@ class MultiHeadAttentionBlock(nn.Module):
         self.rope = RoPE(self.d_k, seq_len)
 
     @staticmethod
-    def attention(query, key, value, mask, dropout: nn.Dropout):
-        d_k = query.shape[-1]
+    def attention(query, key, value, mask, dropout: float):
+        return nn.functional.scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            mask,
+            dropout,
+            is_causal=False
+        )
+        #d_k = query.shape[-1]
 
-        attention_scores = (query @ key.transpose(-2, -1)) / math.sqrt(d_k)
-        if mask is not None:
-            attention_scores.masked_fill_(mask == 0, float("-inf"))
-        attention_scores = attention_scores.softmax(dim = -1)
-        if dropout is not None:
-            attention_scores = dropout(attention_scores)
-
-        return (attention_scores @ value), attention_scores
+        #attention_scores = (query @ key.transpose(-2, -1)) / math.sqrt(d_k)
+        #if mask is not None:
+        #    attention_scores.masked_fill_(mask == 0, float("-inf"))
+        #attention_scores = attention_scores.softmax(dim = -1)
+        #if dropout is not None:
+        #    attention_scores = dropout(attention_scores)
+#
+        #return (attention_scores @ value), attention_scores
     
-    def forward(self, q,k,v, mask):
+    def forward(self, q,k,v, mask, dropout):
         query = self.w_q(q)
         key = self.w_k(k)
         value = self.w_v(v)
@@ -102,7 +112,7 @@ class MultiHeadAttentionBlock(nn.Module):
         query = self.rope(query)
         key = self.rope(key)
 
-        x, self.attention_scores = MultiHeadAttentionBlock.attention(query, key, value, mask, self.dropout)
+        x = MultiHeadAttentionBlock.attention(query, key, value, mask, dropout)
 
         x = x.transpose(1, 2).contiguous().view(x.shape[0], -1, self.h * self.d_k)
 
@@ -133,10 +143,11 @@ class DecoderBlock(nn.Module):
         super().__init__()
         self.self_attention_block =  self_attention_block
         self.feed_forward_block = feed_forward_block
+        self.dropout = dropout
         self.residual_connections = nn.ModuleList([ResidualConnection(dropout, d_model) for _ in range(2)])
 
     def forward(self, x, mask):
-        x = self.residual_connections[0](x, lambda x: self.self_attention_block(x,x,x, mask))
+        x = self.residual_connections[0](x, lambda x: self.self_attention_block(x,x,x, mask, self.dropout))
         x = self.residual_connections[1](x, self.feed_forward_block)
         return x
 
@@ -174,7 +185,7 @@ class Transformer(nn.Module):
 
         return logits
     
-def build_transformer(vocab_size: int, seq_len: int, d_model: int=512, N: int=6, h: int=8, dropout: float=0.1, d_ff: int=2048) -> Transformer:
+def build_transformer(vocab_size: int, seq_len: int, d_model: int=config.d_model, N: int=config.layers, h: int=config.heads, dropout: float=config.dropout, d_ff: int=config.d_ff) -> Transformer:
     embed = InputEmbeddings(d_model, vocab_size)
 
     decoder_blocks = []
@@ -234,6 +245,7 @@ if __name__ == "__main__":
             1e-3
         )
     criterion = nn.CrossEntropyLoss()
+    print(int(0.1))
     for i in range(epochs):
         tran.train()
         optimizer.zero_grad()

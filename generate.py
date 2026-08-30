@@ -2,9 +2,11 @@ import torch
 import torch.nn as nn
 import dataset
 import gpt
-import train
+from tokenizers.decoders import ByteLevel
 
 vocab_size = dataset.tokenizer.get_vocab_size()
+
+dataset.tokenizer.decoder = ByteLevel()
 
 model = gpt.build_transformer(
     vocab_size=vocab_size,
@@ -110,4 +112,4 @@ while again:
 
     response = dataset.tokenizer.decode(response_ids)
 
-    print("Assistant:", response)
+    print("Story:", response)

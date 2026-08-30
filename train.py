@@ -5,29 +5,30 @@ import torch.nn as nn
 import sys
 import math
 import time
+import config
 
 from torch.utils.data import DataLoader
 
-SEQ_LEN = 128
+SEQ_LEN = config.seq_len
 
-BATCH_SIZE = 128
-GRAD_ACCUM_STEPS = 8
+BATCH_SIZE = config.batch_size
+GRAD_ACCUM_STEPS = config.grad_accum
 
-MAX_EPOCHS = 3
+MAX_EPOCHS = config.epochs
 STRIDE = 128
 
-MAX_LR = 3e-4
-MIN_LR = 3e-5 
+MAX_LR = config.max_lr
+MIN_LR = config.min_lr
 
-WEIGHT_DECAY = 0.1
-GRAD_CLIP = 1.0
+WEIGHT_DECAY = config.weight_decay
+GRAD_CLIP = config.grad_clip
 
 PATIENCE = 3
 
 tokens_seen = 0
 epoch_tokens = 0
 
-NUM_WORKERS = 8
+NUM_WORKERS = config.num_workers
 
 def get_lr(step, total_steps):
 
@@ -556,7 +557,22 @@ if __name__ == "__main__":
                     WARMUP_STEPS,
 
                 "weight_decay":
-                    WEIGHT_DECAY
+                    WEIGHT_DECAY,
+
+                "d_ff":
+                config.d_ff,
+
+                "d_model":
+                config.d_model,
+
+                "heads":
+                config.heads,
+
+                "layers":
+                config.layers,
+
+                "vocab_size":
+                config.vocab_size            
             }
         }
 
