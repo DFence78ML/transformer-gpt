@@ -6,6 +6,8 @@ import sys
 import math
 import time
 import config
+import os
+import torch.distributed as dist
 
 from torch.utils.data import DataLoader
 
@@ -51,7 +53,19 @@ def get_lr(step, total_steps):
     return MIN_LR + (
         MAX_LR - MIN_LR
     ) * cosine
+def setup_DDP():
+    rank = int(os.environ["RANK"])
+    local_rank = int(os.environ["LOCAL_RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
+    torch.cuda.set_device(f"cuda:{local_rank}")
+    device = torch.device(f"cuda:{local_rank}")
+    torch.distributed.init_process_group(
+        backend="gloo",
+        init_method="tcp://127.0.0.1:29500?use_libuv=0"
+    )
 
+    return rank, local_rank, world_size, device
+    
 def validate(
     model,
     val_loader,
@@ -109,6 +123,14 @@ def validate(
     return total_loss / batches
 
 if __name__ == "__main__":
+    rank, local_rank, world_size, device = setup_DDP()
+
+    print(
+        f"Rank {rank} | "
+        f"Local Rank {local_rank} | "
+        f"World Size {world_size} | "
+        f"Device {device}"
+    )
     traindataset = dataset.GPTDataset(
         "/kaggle/input/datasets/preetsidhu20/tokenized-files/train.bin",
         SEQ_LEN,
