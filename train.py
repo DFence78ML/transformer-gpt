@@ -60,7 +60,7 @@ def setup_DDP():
     torch.cuda.set_device(f"cuda:{local_rank}")
     device = torch.device(f"cuda:{local_rank}")
     torch.distributed.init_process_group(
-        backend="gloo",
+        backend="nccl",
         init_method="tcp://127.0.0.1:29500?use_libuv=0"
     )
 
