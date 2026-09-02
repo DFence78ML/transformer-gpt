@@ -53,18 +53,7 @@ def get_lr(step, total_steps):
     return MIN_LR + (
         MAX_LR - MIN_LR
     ) * cosine
-def setup_DDP():
-    rank = int(os.environ["RANK"])
-    local_rank = int(os.environ["LOCAL_RANK"])
-    world_size = int(os.environ["WORLD_SIZE"])
-    torch.cuda.set_device(f"cuda:{local_rank}")
-    device = torch.device(f"cuda:{local_rank}")
-    torch.distributed.init_process_group(
-        backend="nccl"
-    )
 
-    return rank, local_rank, world_size, device
-    
 def validate(
     model,
     val_loader,
