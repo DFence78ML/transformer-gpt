@@ -185,7 +185,7 @@ class Transformer(nn.Module):
 
         return logits
     
-def build_transformer(vocab_size: int, seq_len: int, d_model: int=config.d_model, N: int=config.layers, h: int=config.heads, dropout: float=config.dropout, d_ff: int=config.d_ff) -> Transformer:
+def build_transformer(vocab_size: int, seq_len: int, d_model: int=config.modelconfig["d_model"], N: int=config.modelconfig["layers"], h: int=config.modelconfig["heads"], dropout: float=config.modelconfig["dropout"], d_ff: int=config.modelconfig["d_ff"]) -> Transformer:
     embed = InputEmbeddings(d_model, vocab_size)
 
     decoder_blocks = []

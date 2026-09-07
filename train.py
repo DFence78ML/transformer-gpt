@@ -7,11 +7,13 @@ import math
 import time
 import config
 import os
+from torch.utils.data.distributed import DistributedSampler
 import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 from torch.utils.data import DataLoader
 
-SEQ_LEN = config.seq_len
+SEQ_LEN = config.modelconfig["seq_len"]
 
 BATCH_SIZE = config.batch_size
 GRAD_ACCUM_STEPS = config.grad_accum
@@ -19,8 +21,7 @@ GRAD_ACCUM_STEPS = config.grad_accum
 MAX_EPOCHS = config.epochs
 STRIDE = 128
 
-MAX_LR = config.max_lr
-MIN_LR = config.min_lr
+BASE_LR = 1.5e-3
 
 WEIGHT_DECAY = config.weight_decay
 GRAD_CLIP = config.grad_clip
@@ -73,11 +74,10 @@ def validate(
     mask,
     max_batches=100
 ):
-
+    total_tokens = 0
     model.eval()
 
     total_loss = 0.0
-    batches = 0
 
     with torch.no_grad():
 
@@ -97,8 +97,8 @@ def validate(
             )
 
             with torch.amp.autocast(
-                device_type=device,
-                enabled=(device == "cuda")
+                device_type=device.type,
+                enabled=(device.type == "cuda")
             ):
 
                 logits = model(
@@ -113,23 +113,28 @@ def validate(
                     ),
                     y.reshape(-1)
                 )
+            total_tokens += y.numel()
+            total_loss += loss.item() * y.numel()
+    stats = torch.tensor(
+                [total_loss, total_tokens],
+                dtype=torch.float64,
+                device=device
+            )
 
-            total_loss += loss.item()
-            batches += 1
+    dist.all_reduce(
+                stats,
+                op=dist.ReduceOp.SUM
+            )
 
+    global_loss = (
+                stats[0] /
+                stats[1]
+            )
     model.train()
 
-    return total_loss / batches
+    return global_loss.item()
 
 if __name__ == "__main__":
-    rank, local_rank, world_size, device = setup_DDP()
-
-    print(
-        f"Rank {rank} | "
-        f"Local Rank {local_rank} | "
-        f"World Size {world_size} | "
-        f"Device {device}"
-    )
     traindataset = dataset.GPTDataset(
         "/kaggle/input/datasets/preetsidhu20/tokenized-files/train.bin",
         SEQ_LEN,
@@ -142,142 +147,31 @@ if __name__ == "__main__":
         STRIDE
     )
 
-    train_loader = DataLoader(
-        traindataset,
-        batch_size=BATCH_SIZE,
-        shuffle=True,
-        num_workers=NUM_WORKERS,
-        persistent_workers=True,
-        pin_memory=True
-    )
-
-    val_loader = DataLoader(
-        valdataset,
-        batch_size=BATCH_SIZE,
-        shuffle=False,
-        num_workers=NUM_WORKERS,
-        persistent_workers=True,
-        pin_memory=True
-    )
-
-    device = (
-        "cuda"
-        if torch.cuda.is_available()
-        else "cpu"
-    )
-
-    print(f"Device: {device}")
-
-    train_tokens = len(traindataset.data)
-    val_tokens = len(valdataset.data)
-
-    print()
-    print("Dataset statistics")
-    print("------------------")
-    print(f"Train tokens:      {train_tokens:,}")
-    print(f"Validation tokens: {val_tokens:,}")
-    print(f"Total tokens:      {train_tokens + val_tokens:,}")
-
-    print(f"Train sequences:   {len(traindataset):,}")
-    print(f"Val sequences:     {len(valdataset):,}")
-
     vocab_size = dataset.tokenizer.get_vocab_size()
-
+    rank, local_rank, world_size, device = setup_DDP()
     model = gpt.build_transformer(
         vocab_size=vocab_size,
         seq_len=SEQ_LEN
     ).to(device)
 
-    num_params = sum(
-        p.numel()
-        for p in model.parameters()
-    )
+    model = DDP(model,
+                device_ids=[local_rank])
+    
+    raw_model = model.module
 
-    trainable_params = sum(
-        p.numel()
-        for p in model.parameters()
-        if p.requires_grad
-    )
-
-    print()
-    print("Model statistics")
-    print("----------------")
-    print(f"Vocabulary:        {vocab_size:,}")
-    print(f"Parameters:         {num_params:,}")
-    print(f"Trainable params:   {trainable_params:,}")
-
-
-
-    effective_batch_size = (
-        BATCH_SIZE *
-        GRAD_ACCUM_STEPS
-    )
-
-    tokens_per_optimizer_step = (
-        effective_batch_size *
-        SEQ_LEN
-    )
-
-    optimizer_steps_per_epoch = math.ceil(
-        len(train_loader) /
-        GRAD_ACCUM_STEPS
-    )
-
-    total_optimizer_steps = (
-        optimizer_steps_per_epoch *
-        MAX_EPOCHS
-    )
-
-    WARMUP_STEPS = int(total_optimizer_steps * 0.01)
-
-    print()
-    print("Training configuration")
-    print("----------------------")
-    print(f"Batch size:          {BATCH_SIZE}")
-    print(f"Accumulation steps:  {GRAD_ACCUM_STEPS}")
-    print(f"Effective batch:     {effective_batch_size}")
-    print(
-        f"Tokens / update:     "
-        f"{tokens_per_optimizer_step:,}"
-    )
-    print(f"Max LR:              {MAX_LR}")
-    print(f"Min LR:              {MIN_LR}")
-    print(f"Warmup steps:        {WARMUP_STEPS}")
-
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=MAX_LR,
-        betas=(0.9, 0.95),
-        weight_decay=WEIGHT_DECAY
-    )
-
-    print()
-    print(
-        f"Optimizer steps / epoch: "
-        f"{optimizer_steps_per_epoch:,}"
-    )
-
-    print(
-        f"Total optimizer steps:   "
-        f"{total_optimizer_steps:,}"
-    )
-
-    use_amp = device == "cuda"
+    use_amp = device.type == "cuda"
 
     scaler = torch.amp.GradScaler(
         "cuda",
         enabled=use_amp
     )
 
-    criterion = nn.CrossEntropyLoss()
-
-    raw_model = model
-
-    model = torch.compile(model)
-
-    mask = gpt.create_causal_mask(
-        SEQ_LEN
-    ).to(device)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=BASE_LR,
+        betas=(0.9, 0.95),
+        weight_decay=WEIGHT_DECAY
+    )
 
     load = (
         sys.argv[1].lower()
@@ -291,6 +185,9 @@ if __name__ == "__main__":
         start_epoch = 0
         patience_counter = 0
         global_step = 0
+        optimizer_steps_per_epoch = 0
+        MAX_LR = config.max_lr
+        MIN_LR = config.min_lr
 
     else:
 
@@ -313,6 +210,8 @@ if __name__ == "__main__":
                 "best.pt",
                 map_location="cpu"
             )
+        if checkpoint["config"] != config.modelconfig:
+            raise RuntimeError("Checkpoint config doesn't match config model config")
 
 
         raw_model.load_state_dict(
@@ -362,30 +261,248 @@ if __name__ == "__main__":
             0
         )
 
+        total_optimizer_steps = checkpoint.get(
+            "total_optimizer_steps",
+            0
+        )
+
+        WARMUP_STEPS = checkpoint.get(
+            "warmup_steps",
+            int(total_optimizer_steps * 0.01)
+        )
+
+        MIN_LR = checkpoint.get(
+            "min_lr",
+            config.min_lr
+        )
+        MAX_LR = checkpoint.get(
+            "max_lr",
+            config.max_lr
+                )
+        if rank == 0:
+            cuda_rng_state = checkpoint.get(
+                    "cuda_rng_state",
+                    None
+                )
+            cpu_rng_state = checkpoint.get(
+                    "cpu_rng_state",
+                    None
+                )
+        else:
+            cuda_rng_state = None
+            cpu_rng_state = None
+        cuda_recieved = torch.empty(
+                torch.cuda.get_rng_state().numel(),
+                dtype = torch.uint8,
+                device=device
+            )
+        if rank == 0:
+            cuda_rng_scatter = [state.to(device) for state in cuda_rng_state]
+        else:
+            cuda_rng_scatter = None
+        dist.scatter(
+            cuda_recieved,
+            scatter_list=cuda_rng_scatter,
+            src=0
+        )
+
+        torch.cuda.set_rng_state(
+            cuda_recieved,
+            device=device
+        )
+
+        cpu_rng_receive = torch.empty(
+            torch.get_rng_state().numel(),
+            dtype=torch.uint8,
+            device=device
+        )
+
+        if rank == 0:
+            cpu_rng_scatter = [
+                state.to(device)
+                for state in cpu_rng_state
+            ]
+        else:
+            cpu_rng_scatter = None
+
+        dist.scatter(
+            cpu_rng_receive,
+            scatter_list=cpu_rng_scatter,
+            src=0
+        )
+
+        cpu_rng_receive = cpu_rng_receive.cpu()
+
+        torch.set_rng_state(
+            cpu_rng_receive
+        )
+    print(
+        f"Rank {rank} | "
+        f"Local Rank {local_rank} | "
+        f"World Size {world_size} | "
+        f"Device {device}"
+    )
+
+    train_sampler = DistributedSampler(
+        traindataset,
+        num_replicas=world_size,
+        rank=rank,
+        shuffle=True
+    )
+
+    train_loader = DataLoader(
+        traindataset,
+        batch_size=BATCH_SIZE,
+        sampler=train_sampler,
+        num_workers=NUM_WORKERS,
+        persistent_workers=True,
+        pin_memory=True
+    )
+    val_sampler = DistributedSampler(
+            valdataset,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=False
+    )
+
+    val_loader = DataLoader(
+        valdataset,
+        batch_size=BATCH_SIZE,
+        sampler=val_sampler,
+        num_workers=NUM_WORKERS,
+        persistent_workers=True,
+        pin_memory=True
+    )
+    if optimizer_steps_per_epoch == 0:
+        optimizer_steps_per_epoch = math.ceil(
+                len(train_loader)
+            )
+            
+        total_optimizer_steps = (
+                optimizer_steps_per_epoch *
+                MAX_EPOCHS
+            )
+        WARMUP_STEPS = int(total_optimizer_steps * 0.01)
+
+    print(f"Device: {device}")
+
+    train_tokens = len(traindataset.data)
+    val_tokens = len(valdataset.data)
+    if rank == 0:
+        print()
+        print("Dataset statistics")
+        print("------------------")
+        print(f"Train tokens:      {train_tokens:,}")
+        print(f"Validation tokens: {val_tokens:,}")
+        print(f"Total tokens:      {train_tokens + val_tokens:,}")
+
+        print(f"Train sequences:   {len(traindataset):,}")
+        print(f"Val sequences:     {len(valdataset):,}")
+
+    num_params = sum(
+        p.numel()
+        for p in model.parameters()
+    )
+
+    trainable_params = sum(
+        p.numel()
+        for p in model.parameters()
+        if p.requires_grad
+    )
+    if rank == 0:
+        print()
+        print("Model statistics")
+        print("----------------")
+        print(f"Vocabulary:        {vocab_size:,}")
+        print(f"Parameters:         {num_params:,}")
+        print(f"Trainable params:   {trainable_params:,}")
+
+
+
+    effective_batch_size = (
+        BATCH_SIZE *
+        GRAD_ACCUM_STEPS *
+        world_size
+    )
+
+    tokens_per_optimizer_step = (
+        effective_batch_size *
+        SEQ_LEN
+    )
+
+ 
+    if rank == 0:
+        print()
+        print("Training configuration")
+        print("----------------------")
+        print(f"Batch size:          {BATCH_SIZE}")
+        print(f"Accumulation steps:  {GRAD_ACCUM_STEPS}")
+        print(f"Effective batch:     {effective_batch_size}")
+        print(
+            f"Tokens / update:     "
+            f"{tokens_per_optimizer_step:,}"
+        )
+        print(f"Max LR:              {MAX_LR}")
+        print(f"Min LR:              {MIN_LR}")
+        print(f"Warmup steps:        {WARMUP_STEPS}")
+
+    if rank == 0:
+        print()
+        print(
+            f"Optimizer steps / epoch: "
+            f"{optimizer_steps_per_epoch:,}"
+        )
+
+        print(
+            f"Total optimizer steps:   "
+            f"{total_optimizer_steps:,}"
+        )
+
+    criterion = nn.CrossEntropyLoss()
+
+    mask = gpt.create_causal_mask(
+        SEQ_LEN
+    ).to(device)
+
     for epoch in range(
         start_epoch,
         MAX_EPOCHS
     ):
+        train_sampler.set_epoch(epoch)
 
         model.train()
         epoch_tokens = 0
         batch_tokens = 0
 
         total_loss = 0.0
+        torch.cuda.synchronize()
         start_time = time.time()
         optimizer.zero_grad(
             set_to_none=True
         )
 
         print()
-        print(
-            f"Epoch {epoch + 1}/{MAX_EPOCHS}"
-        )
+        if rank == 0:
+            print(
+                f"Epoch {epoch + 1}/{MAX_EPOCHS}"
+            )
 
 
         for batch_idx, (x, y) in enumerate(
             train_loader
         ):
+            is_update_step = (
+                (batch_idx + 1)
+                % GRAD_ACCUM_STEPS == 0
+            )
+
+            is_last_batch = (
+                batch_idx + 1
+                == len(train_loader)
+            )
+            remaining = len(train_loader) - (batch_idx)
+            microbatch = min(GRAD_ACCUM_STEPS, remaining)
+            should_sync = is_last_batch or is_update_step
 
             x = x.to(
                 device,
@@ -398,31 +515,50 @@ if __name__ == "__main__":
             )
 
             batch_tokens = (x.size(0) * x.size(1))
-            epoch_tokens += batch_tokens
-            tokens_seen += batch_tokens
+            epoch_tokens += batch_tokens * world_size
+            tokens_seen += batch_tokens * world_size
+            if should_sync:
+                with torch.amp.autocast(
+                    device_type="cuda",
+                    enabled=use_amp
+                ):
 
-            with torch.amp.autocast(
-                device_type=device,
-                enabled=use_amp
-            ):
+                    logits = model(
+                        x,
+                        mask
+                    )
 
-                logits = model(
-                    x,
-                    mask
-                )
+                    loss = criterion(
+                        logits.reshape(
+                            -1,
+                            logits.size(-1)
+                        ),
+                        y.reshape(-1)
+                    )
+            else:
+                with model.no_sync():
+                    with torch.amp.autocast(
+                        device_type="cuda",
+                        enabled=use_amp
+                    ):
 
-                loss = criterion(
-                    logits.reshape(
-                        -1,
-                        logits.size(-1)
-                    ),
-                    y.reshape(-1)
-                )
-                logging_loss = loss.item()
-                loss = (
-                    loss /
-                    GRAD_ACCUM_STEPS
-                )
+                        logits = model(
+                            x,
+                            mask
+                        )
+
+                        loss = criterion(
+                            logits.reshape(
+                                -1,
+                                logits.size(-1)
+                            ),
+                            y.reshape(-1)
+                        )
+            logging_loss = loss.item() * y.numel()
+            loss = (
+                loss /
+                microbatch
+            )
 
 
             scaler.scale(
@@ -431,16 +567,6 @@ if __name__ == "__main__":
 
 
             total_loss += logging_loss
-
-            is_update_step = (
-                (batch_idx + 1)
-                % GRAD_ACCUM_STEPS == 0
-            )
-
-            is_last_batch = (
-                batch_idx + 1
-                == len(train_loader)
-            )
 
 
             if is_update_step or is_last_batch:
@@ -474,10 +600,11 @@ if __name__ == "__main__":
                     set_to_none=True
                 )
                 global_step += 1
+                torch.cuda.synchronize()
                 elapsed = time.time() - start_time
                 tokens_per_sec = int(epoch_tokens / elapsed)
 
-                if global_step % 100 == 0:
+                if global_step % 100 == 0 and rank == 0:
 
                     print(
                         f"Step {global_step:,} | "
@@ -486,10 +613,22 @@ if __name__ == "__main__":
                         f"Tokens per sec {tokens_per_sec}"
                     )
 
-        train_loss = (
-            total_loss /
-            len(train_loader)
+        stats = torch.tensor(
+            [total_loss, epoch_tokens],
+            dtype=torch.float64,
+            device=device
         )
+
+        dist.all_reduce(
+            stats,
+            op=dist.ReduceOp.SUM
+        )
+
+        train_loss = (
+            stats[0] /
+            stats[1]
+        )
+
         elapsed = time.time() - start_time
 
         val_loss = validate(
@@ -504,122 +643,182 @@ if __name__ == "__main__":
             min(val_loss, 20)
         )
 
+        local_cuda_rng = torch.cuda.get_rng_state()
+        local_cpu_rng = torch.get_rng_state()
 
-        print()
-        print(
-            f"Epoch {epoch + 1} | "
-            f"Train Loss: {train_loss:.4f} | "
-            f"Val Loss: {val_loss:.4f} | "
-            f"Perplexity: {perplexity:.2f}"
-            f"Tokens seen this epoch: {epoch_tokens}"
-            f"Tokens per sec: {tokens_per_sec}"
-            f"Total tokens seen: {tokens_seen}"
-        )
+        local_cpu_rng_cuda = local_cpu_rng.to(device)
 
-        is_best = (
-            val_loss < best_val_loss
-        )
-
-        if is_best:
-
-            best_val_loss = val_loss
-            patience_counter = 0
-
+        if rank == 0:
+            gathered_cuda_rng = [
+                torch.empty_like(local_cuda_rng).to(device)
+                for _ in range(world_size)
+            ]
         else:
+            gathered_cuda_rng = None
 
-            patience_counter += 1
+        dist.gather(
+            local_cuda_rng.to(device),
+            gather_list=gathered_cuda_rng,
+            dst=0
+        )
 
+        if rank == 0:
+            gathered_cpu_rng = [
+                torch.empty_like(local_cpu_rng_cuda)
+                for _ in range(world_size)
+            ]
+        else:
+            gathered_cpu_rng = None
+
+        dist.gather(
+            local_cpu_rng_cuda,
+            gather_list=gathered_cpu_rng,
+            dst=0
+        )
+
+        if rank == 0:
+            gathered_cuda_rng = [
+                state.cpu()
+                for state in gathered_cuda_rng
+            ]
+
+            gathered_cpu_rng = [
+                state.cpu()
+                for state in gathered_cpu_rng
+            ]
+
+        if (rank == 0):
+            print()
             print(
-                f"Patience "
-                f"{patience_counter}/{PATIENCE}"
+                f"Epoch {epoch + 1} | "
+                f"Train Loss: {train_loss:.4f} | "
+                f"Val Loss: {val_loss:.4f} | "
+                f"Perplexity: {perplexity:.2f}"
+                f"Tokens seen this epoch: {epoch_tokens}"
+                f"Tokens per sec: {tokens_per_sec}"
+                f"Total tokens seen: {tokens_seen}"
             )
 
-        checkpoint = {
+            is_best = (
+                val_loss < best_val_loss
+            )
 
-            "epoch": epoch,
+            if is_best:
 
-            "global_step": global_step,
+                best_val_loss = val_loss
+                patience_counter = 0
 
-            "model_state_dict":
-                raw_model.state_dict(),
+            else:
 
-            "optimizer_state_dict":
-                optimizer.state_dict(),
+                patience_counter += 1
 
-            "scaler_state_dict":
-                scaler.state_dict(),
+                print(
+                    f"Patience "
+                    f"{patience_counter}/{PATIENCE}"
+                )
 
-            "best_val_loss":
-                best_val_loss,
+            checkpoint = {
 
-            "patience_counter":
-                patience_counter,
+                "epoch": epoch,
 
-            "tokens_seen": tokens_seen,
+                "global_step": global_step,
 
-            "config": {
+                "model_state_dict":
+                    raw_model.state_dict(),
 
-                "seq_len":
-                    SEQ_LEN,
+                "optimizer_state_dict":
+                    optimizer.state_dict(),
+
+                "scaler_state_dict":
+                    scaler.state_dict(),
+
+                "best_val_loss":
+                    best_val_loss,
+
+                "patience_counter":
+                    patience_counter,
+
+                "tokens_seen": 
+                tokens_seen,
 
                 "batch_size":
-                    BATCH_SIZE,
+                BATCH_SIZE,
 
                 "grad_accum_steps":
-                    GRAD_ACCUM_STEPS,
+                GRAD_ACCUM_STEPS,
 
                 "max_lr":
-                    MAX_LR,
+                MAX_LR,
 
                 "min_lr":
-                    MIN_LR,
+                MIN_LR,
 
                 "warmup_steps":
-                    WARMUP_STEPS,
+                WARMUP_STEPS,
 
                 "weight_decay":
-                    WEIGHT_DECAY,
+                WEIGHT_DECAY,
 
-                "d_ff":
-                config.d_ff,
+                "total_optimizer_steps":
+                total_optimizer_steps,
 
-                "d_model":
-                config.d_model,
+                "config": {
+                    "seq_len":
+                    SEQ_LEN,
 
-                "heads":
-                config.heads,
+                    "d_ff":
+                    config.modelconfig["d_ff"],
 
-                "layers":
-                config.layers,
+                    "d_model":
+                    config.modelconfig["d_model"],
 
-                "vocab_size":
-                config.vocab_size            
+                    "heads":
+                    config.modelconfig["heads"],
+
+                    "layers":
+                    config.modelconfig["layers"],
+
+                    "vocab_size":
+                    config.modelconfig["vocab_size"],
+
+                    "dropout":
+                    config.modelconfig["dropout"]
+                },
+
+                "cpu_rng_state":
+                gathered_cpu_rng,
+    
+                "cuda_rng_state":
+                gathered_cuda_rng
+
             }
-        }
 
-
-        torch.save(
-            checkpoint,
-            "/kaggle/working/latest.pt"
-        )
-
-
-        if is_best:
 
             torch.save(
                 checkpoint,
-                "/kaggle/working/best.pt"
+                "/kaggle/working/latest.pt"
             )
+
+
+            if is_best:
+
+                torch.save(
+                    checkpoint,
+                    "/kaggle/working/best.pt"
+                )
 
         if patience_counter >= PATIENCE:
+            if rank == 0:
+                print()
+                print(
+                    "Early stopping!"
+                )
 
-            print()
-            print(
-                "Early stopping!"
-            )
-
-            print(
-                f"Best validation loss: "
-                f"{best_val_loss:.4f}"
-            )
+                print(
+                    f"Best validation loss: "
+                    f"{best_val_loss:.4f}"
+                )
+        should_stop = torch.tensor(patience_counter >= PATIENCE, dtype = torch.bool, device = device)
+        dist.broadcast(should_stop, src = 0)
+        if should_stop.item():
             break

@@ -1,12 +1,15 @@
 
 #MODEL
-vocab_size = 32000
-d_model = 512
-layers = 6
-heads = 8
-d_ff = 2048
-dropout = 0.1
-seq_len = 128
+modelconfig = {
+    "vocab_size" : 32000,
+    "d_model" : 512,
+    "layers" : 6,
+    "heads" : 8,
+    "d_ff" : 2048,
+    "dropout" : 0.1,
+    "seq_len" : 128
+}
+
 
 #TRAINING
 batch_size = 128
