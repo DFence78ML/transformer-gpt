@@ -27,4 +27,4 @@ val_file = "/kaggle/input/datasets/preetsidhu20/tokenized-files/val.bin"
 tokenizer = "tokenizer.json"
 
 #HARDWARE
-num_workers = 2
+num_workers = 8
