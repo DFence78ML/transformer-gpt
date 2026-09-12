@@ -159,7 +159,7 @@ if __name__ == "__main__":
     
     raw_model = model.module
 
-    use_amp = device.type == "cuda"
+    use_amp = False#device.type == "cuda"
 
     scaler = torch.amp.GradScaler(
         "cuda",
