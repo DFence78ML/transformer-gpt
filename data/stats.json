@@ -1,7 +1,13 @@
 {
-    "train_documents": 2013566,
-    "validation_documents": 105910,
-    "train_characters": 1795104307,
-    "validation_characters": 94483473,
-    "total_characters": 1889587780
+    "train_documents": 1638,
+    "validation_documents": 72,
+    "train_characters": 1768760,
+    "validation_characters": 76860,
+    "total_characters": 1845620,
+    "duplicate_docs": 168,
+    "short_docs": 0,
+    "raw_docs": 1832,
+    "val_average_chars_per_doc": 1067,
+    "train_average_chars_per_doc": 1079,
+    "Post de duplication": 1710
 }

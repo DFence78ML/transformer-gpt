@@ -2,6 +2,15 @@ import torch
 import torch.nn as nn
 import config
 
+
+#
+#
+#
+# Make it generate minecraft reddit stories after fine tuning
+#
+#
+#
+
 class InputEmbeddings(nn.Module):
     def __init__(self, d_model: int, vocab_size: int):
         super().__init__()

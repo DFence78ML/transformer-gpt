@@ -375,7 +375,7 @@ if __name__ == "__main__":
     )
     if optimizer_steps_per_epoch == 0:
         optimizer_steps_per_epoch = math.ceil(
-                len(train_loader)
+                len(train_loader) // GRAD_ACCUM_STEPS
             )
             
         total_optimizer_steps = (
