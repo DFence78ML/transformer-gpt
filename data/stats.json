@@ -6,7 +6,7 @@
     "total_characters": 1845620,
     "duplicate_docs": 168,
     "short_docs": 0,
-    "raw_docs": 1832,
+    "raw_docs": 2000,
     "val_average_chars_per_doc": 1067,
     "train_average_chars_per_doc": 1079,
     "Post de duplication": 1710

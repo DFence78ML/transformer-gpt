@@ -94,7 +94,9 @@ def create_hash_params(num_hashes, seed):
 def create_minhash_signature(shingles, hash_params, p):
     result = []
     hashed_shingles = []
+    assert len(shingles) > 0
     for shingle in shingles:
+        assert shingle != ""
         hashed_shingles.append(hash_shingle(shingle))
     hashed_shingles = np.array(hashed_shingles, dtype = "uint64")
     hash_params = np.array(hash_params)
@@ -327,8 +329,8 @@ def read_stories(issues):
                 buffer = deduplicate(buffer, seen_hashes)
                 if buffer is not None:
                         if len(buffer) >= MIN_CHARS:
-                            yield buffer
                             issues["retained"] += 1
+                            yield buffer
                         else:
                             issues["short"]+=1
                 elif buffer is None:
@@ -336,17 +338,16 @@ def read_stories(issues):
 
 
 def prepare_data():
+    OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True
+    )
     #OVERWRITE EACH RUN
     with open(DOCUMENTS_FILE, "w") as f:
         pass
     with open(DOCUMENTS_IDX, "w") as f:
             pass
     random.seed(SEED)
-
-    OUTPUT_DIR.mkdir(
-        parents=True,
-        exist_ok=True
-    )
 
     temp_train = (
         OUTPUT_DIR / "train_temp.txt"
@@ -375,14 +376,6 @@ def prepare_data():
     param, p = create_hash_params(HASH_FUNC_NUM,SEED)
 
     with open(
-        temp_train,
-        "w",
-        encoding="utf-8"
-    ) as train_file, open(
-        temp_val,
-        "w",
-        encoding="utf-8"
-    ) as val_file, open(
         DOCUMENTS_IDX,
         "a"
     ) as documents_idx, open(
@@ -420,6 +413,7 @@ def prepare_data():
             if ((i+1) % 10000 ) == 0:
                 print(f"Processed {i+1} documents")
                 #pass
+        assert doc_id > 0
         pairs = extract_pairs(buckets)
         print("Number of documents:", doc_id)
         print("Number of candidate pairs:", len(pairs))
@@ -539,10 +533,11 @@ def prepare_data():
                     print(f"Processed {train_count + val_count} files")
     end_time = time.time()
     print(end_time - start_time)
-
-    issues["raw"] -= issues["duplicate"]
+    assert train_count > 0 and val_count > 0
+    assert train_chars > 0 and val_chars > 0
+    assert issues["retained"] - train_count - val_count - len(removed_ids) == 0
+    assert issues["raw"] - train_count - val_count - len(removed_ids) - issues["duplicate"]  - issues["empty"] - issues["short"]== 0
     retained_after_all = train_count + val_count
-    raw = issues["duplicate"] + issues["short"] + issues["retained"] + issues["empty"]
     train_average_chars_per_doc = train_chars // train_count
     val_average_chars_per_doc = val_chars // val_count
 
@@ -635,8 +630,6 @@ def prepare_data():
         f"{issues["raw"]:,}"
     )
 
-    #assert raw == issues["raw"]
-
     print(
         f"Average characters per train doc: " 
         f"{train_average_chars_per_doc:,}"
@@ -648,8 +641,18 @@ def prepare_data():
     )
 
     print(
-        f"post de duplication: "
+        f"Post de duplication: "
         f"{retained_after_all:,}"
+    )
+
+    print(
+        f"Near duplicates: "
+        f"{len(near_dupes)}"
+    )
+
+    print(
+        f"Documents removed as near dupes: "
+        f"{len(removed_ids)}"
     )
 
 if __name__ == "__main__":
