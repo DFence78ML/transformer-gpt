@@ -120,6 +120,10 @@ class MultiHeadAttentionBlock(nn.Module):
 
         query = self.rope(query)
         key = self.rope(key)
+        if self.training:
+            pass
+        else:
+            dropout = 0
 
         x = MultiHeadAttentionBlock.attention(query, key, value, mask, dropout)
 
@@ -215,7 +219,6 @@ def build_transformer(vocab_size: int, seq_len: int, d_model: int=config.modelco
     for p in transformer.parameters():
         if p.dim() > 1:
             nn.init.xavier_uniform_(p)
-    
     return transformer
 
 def create_causal_mask(size):
@@ -246,6 +249,7 @@ if __name__ == "__main__":
     targets = targets.reshape(-1)
 
     tran = build_transformer(vocab_size,seq_len)
+    tran.eval()
     mask = create_causal_mask(seq_len)
     total_loss = 0
     

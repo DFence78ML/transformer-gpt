@@ -373,15 +373,17 @@ if __name__ == "__main__":
         persistent_workers=True,
         pin_memory=True
     )
-    if optimizer_steps_per_epoch == 0:
-        optimizer_steps_per_epoch = math.ceil(
-                len(train_loader) // GRAD_ACCUM_STEPS
-            )
-            
+
+    optimizer_steps_per_epoch = math.ceil(
+            len(train_loader) / GRAD_ACCUM_STEPS
+        )
+
+    
+    if load == "no":
         total_optimizer_steps = (
-                optimizer_steps_per_epoch *
-                MAX_EPOCHS
-            )
+                    optimizer_steps_per_epoch *
+                    MAX_EPOCHS
+        )
         WARMUP_STEPS = int(total_optimizer_steps * 0.01)
 
     print(f"Device: {device}")
@@ -500,8 +502,29 @@ if __name__ == "__main__":
                 batch_idx + 1
                 == len(train_loader)
             )
-            remaining = len(train_loader) - (batch_idx)
-            microbatch = min(GRAD_ACCUM_STEPS, remaining)
+
+            group_start = (
+                batch_idx // GRAD_ACCUM_STEPS
+            ) * GRAD_ACCUM_STEPS
+
+            microbatch = min(
+                GRAD_ACCUM_STEPS,
+                len(train_loader) - group_start
+            )
+
+            if batch_idx == group_start:
+                group_end = min(
+                    group_start + GRAD_ACCUM_STEPS,
+                    len(train_loader)
+                )
+
+                group_tokens = sum(
+                    min(
+                        BATCH_SIZE,
+                        len(train_sampler) - i * BATCH_SIZE
+                    ) * SEQ_LEN
+                    for i in range(group_start, group_end)
+                )
             should_sync = is_last_batch or is_update_step
 
             x = x.to(
@@ -515,7 +538,7 @@ if __name__ == "__main__":
             )
 
             batch_tokens = (x.size(0) * x.size(1))
-            epoch_tokens += batch_tokens * world_size
+            epoch_tokens += batch_tokens
             tokens_seen += batch_tokens * world_size
             if should_sync:
                 with torch.amp.autocast(
@@ -535,6 +558,17 @@ if __name__ == "__main__":
                         ),
                         y.reshape(-1)
                     )
+
+                logging_loss = loss.item() * y.numel()
+                loss = (
+                    loss * y.numel() /
+                    group_tokens
+                )
+
+
+                scaler.scale(
+                    loss
+                ).backward()
             else:
                 with model.no_sync():
                     with torch.amp.autocast(
@@ -554,16 +588,16 @@ if __name__ == "__main__":
                             ),
                             y.reshape(-1)
                         )
-            logging_loss = loss.item() * y.numel()
-            loss = (
-                loss /
-                microbatch
-            )
+                    logging_loss = loss.item() * y.numel()
+                    loss = (
+                        loss * y.numel() /
+                        group_tokens
+                    )
 
 
-            scaler.scale(
-                loss
-            ).backward()
+                    scaler.scale(
+                        loss
+                    ).backward()
 
 
             total_loss += logging_loss
