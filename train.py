@@ -7,9 +7,13 @@ import math
 import time
 import config
 import os
+import torchvision
 from torch.utils.data.distributed import DistributedSampler
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+import torchvision.models as models
+from torch.profiler import profile, ProfilerActivity, record_function
+from torch.profiler import schedule
 
 from torch.utils.data import DataLoader
 
@@ -85,7 +89,7 @@ def validate(
 
             if i >= max_batches:
                 break
-
+            
             x = x.to(
                 device,
                 non_blocking=True
@@ -133,6 +137,12 @@ def validate(
     model.train()
 
     return global_loss.item()
+
+def trace_handler(p):
+    sort_by_keyword = "self_" + device + "_time_total"
+    output = p.key_averages().table(sort_by=sort_by_keyword, row_limit=10)
+    print(output)
+    p.export_chrome_trace("/kaggle/temp/trace_" + str(p.step_num) + ".json")
 
 if __name__ == "__main__":
     traindataset = dataset.GPTDataset(
@@ -465,7 +475,6 @@ if __name__ == "__main__":
     mask = gpt.create_causal_mask(
         SEQ_LEN
     ).to(device)
-
     for epoch in range(
         start_epoch,
         MAX_EPOCHS
@@ -489,88 +498,63 @@ if __name__ == "__main__":
                 f"Epoch {epoch + 1}/{MAX_EPOCHS}"
             )
 
+        with profile(
+        activities=ProfilerActivity.CUDA,
+        schedule=torch.profiler.schedule(wait=2, warmup=2, active=5, repeat=1),
+        on_trace_ready=trace_handler,
+            ) as p:
 
-        for batch_idx, (x, y) in enumerate(
-            train_loader
-        ):
-            is_update_step = (
-                (batch_idx + 1)
-                % GRAD_ACCUM_STEPS == 0
-            )
-
-            is_last_batch = (
-                batch_idx + 1
-                == len(train_loader)
-            )
-
-            group_start = (
-                batch_idx // GRAD_ACCUM_STEPS
-            ) * GRAD_ACCUM_STEPS
-
-            microbatch = min(
-                GRAD_ACCUM_STEPS,
-                len(train_loader) - group_start
-            )
-
-            if batch_idx == group_start:
-                group_end = min(
-                    group_start + GRAD_ACCUM_STEPS,
-                    len(train_loader)
+            for batch_idx, (x, y) in enumerate(
+                train_loader
+            ):
+                is_update_step = (
+                    (batch_idx + 1)
+                    % GRAD_ACCUM_STEPS == 0
                 )
 
-                group_tokens = sum(
-                    min(
-                        BATCH_SIZE,
-                        len(train_sampler) - i * BATCH_SIZE
-                    ) * SEQ_LEN
-                    for i in range(group_start, group_end)
+                is_last_batch = (
+                    batch_idx + 1
+                    == len(train_loader)
                 )
-            should_sync = is_last_batch or is_update_step
 
-            x = x.to(
-                device,
-                non_blocking=True
-            )
+                group_start = (
+                    batch_idx // GRAD_ACCUM_STEPS
+                ) * GRAD_ACCUM_STEPS
 
-            y = y.to(
-                device,
-                non_blocking=True
-            )
+                microbatch = min(
+                    GRAD_ACCUM_STEPS,
+                    len(train_loader) - group_start
+                )
 
-            batch_tokens = (x.size(0) * x.size(1))
-            epoch_tokens += batch_tokens
-            tokens_seen += batch_tokens * world_size
-            if should_sync:
-                with torch.amp.autocast(
-                    device_type="cuda",
-                    enabled=use_amp
-                ):
-
-                    logits = model(
-                        x,
-                        mask
+                if batch_idx == group_start:
+                    group_end = min(
+                        group_start + GRAD_ACCUM_STEPS,
+                        len(train_loader)
                     )
 
-                    loss = criterion(
-                        logits.reshape(
-                            -1,
-                            logits.size(-1)
-                        ),
-                        y.reshape(-1)
+                    group_tokens = sum(
+                        min(
+                            BATCH_SIZE,
+                            len(train_sampler) - i * BATCH_SIZE
+                        ) * SEQ_LEN
+                        for i in range(group_start, group_end)
                     )
+                should_sync = is_last_batch or is_update_step
 
-                logging_loss = loss.item() * y.numel()
-                loss = (
-                    loss * y.numel() /
-                    group_tokens
+                x = x.to(
+                    device,
+                    non_blocking=True
                 )
 
+                y = y.to(
+                    device,
+                    non_blocking=True
+                )
 
-                scaler.scale(
-                    loss
-                ).backward()
-            else:
-                with model.no_sync():
+                batch_tokens = (x.size(0) * x.size(1))
+                epoch_tokens += batch_tokens
+                tokens_seen += batch_tokens * world_size
+                if should_sync:
                     with torch.amp.autocast(
                         device_type="cuda",
                         enabled=use_amp
@@ -588,6 +572,7 @@ if __name__ == "__main__":
                             ),
                             y.reshape(-1)
                         )
+
                     logging_loss = loss.item() * y.numel()
                     loss = (
                         loss * y.numel() /
@@ -598,54 +583,85 @@ if __name__ == "__main__":
                     scaler.scale(
                         loss
                     ).backward()
+                else:
+                    with model.no_sync():
+                        with torch.amp.autocast(
+                            device_type="cuda",
+                            enabled=use_amp
+                        ):
+
+                            logits = model(
+                                x,
+                                mask
+                            )
+
+                            loss = criterion(
+                                logits.reshape(
+                                    -1,
+                                    logits.size(-1)
+                                ),
+                                y.reshape(-1)
+                            )
+                        logging_loss = loss.item() * y.numel()
+                        loss = (
+                            loss * y.numel() /
+                            group_tokens
+                        )
 
 
-            total_loss += logging_loss
+                        scaler.scale(
+                            loss
+                        ).backward()
 
 
-            if is_update_step or is_last_batch:
-                scaler.unscale_(
-                    optimizer
-                )
-
-                torch.nn.utils.clip_grad_norm_(
-                    model.parameters(),
-                    GRAD_CLIP
-                )
-
-                lr = get_lr(
-                    global_step,
-                    total_optimizer_steps
-                )
-                for param_group in (
-                    optimizer.param_groups
-                ):
-
-                    param_group["lr"] = lr
-
-                scaler.step(
-                    optimizer
-                )
-
-                scaler.update()
+                total_loss += logging_loss
 
 
-                optimizer.zero_grad(
-                    set_to_none=True
-                )
-                global_step += 1
-                torch.cuda.synchronize()
-                elapsed = time.time() - start_time
-                tokens_per_sec = int(epoch_tokens / elapsed)
-
-                if global_step % 100 == 0 and rank == 0:
-
-                    print(
-                        f"Step {global_step:,} | "
-                        f"LR {lr:.2e}"
-                        f"Time: {elapsed}"
-                        f"Tokens per sec {tokens_per_sec}"
+                if is_update_step or is_last_batch:
+                    scaler.unscale_(
+                        optimizer
                     )
+
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(),
+                        GRAD_CLIP
+                    )
+
+                    lr = get_lr(
+                        global_step,
+                        total_optimizer_steps
+                    )
+                    for param_group in (
+                        optimizer.param_groups
+                    ):
+
+                        param_group["lr"] = lr
+
+                    scaler.step(
+                        optimizer
+                    )
+
+                    p.step()
+
+                    scaler.update()
+
+
+                    optimizer.zero_grad(
+                        set_to_none=True
+                    )
+                    global_step += 1
+                    torch.cuda.synchronize()
+                    elapsed = time.time() - start_time
+                    tokens_per_sec = int(epoch_tokens / elapsed)
+
+                    if global_step % 100 == 0 and rank == 0:
+
+                        print(
+                            f"Step {global_step:,} | "
+                            f"LR {lr:.2e}"
+                            f"Time: {elapsed}"
+                            f"Tokens per sec {tokens_per_sec}"
+                        )
 
         stats = torch.tensor(
             [total_loss, epoch_tokens],
