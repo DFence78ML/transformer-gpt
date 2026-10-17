@@ -35,7 +35,7 @@ epoch_tokens = 0
 NUM_WORKERS = config.num_workers
 
 PROFILE_EPOCH = 0
-PROFILING_BOOL = True
+PROFILING_BOOL = False
 
 def get_lr(step, total_steps):
 
@@ -81,7 +81,7 @@ def validate(
     total_tokens = 0
     model.eval()
 
-    total_loss = 0.0
+    total_loss = torch.tensor(0.0, dtype=torch.float64).to(device)
 
     with torch.no_grad():
 
@@ -117,13 +117,16 @@ def validate(
                     ),
                     y.reshape(-1)
                 )
+
+            loss = loss * y.numel()
+            logging_loss = loss
+
             total_tokens += y.numel()
-            total_loss += loss.item() * y.numel()
-    stats = torch.tensor(
-                [total_loss, total_tokens],
-                dtype=torch.float64,
-                device=device
-            )
+
+            total_loss += logging_loss
+    
+    total_tokens = torch.tensor(total_tokens, dtype=torch.float64).to(device)
+    stats = torch.stack([total_loss, total_tokens])
 
     dist.all_reduce(
                 stats,
@@ -145,6 +148,7 @@ def trace_handler(p):
         p.export_chrome_trace(f"/kaggle/working/rank_{rank}_trace_{str(p.step_num)}.json")
 
 def training_loop(profiling_bool, train_loader, model, optimizer, scaler, criterion, device, mask, train_sampler, p, epoch_tokens, tokens_seen, total_loss, global_step, start_time, total_optimizer_steps, world_size, rank, use_amp):
+            tokens_per_sec = 0.0
             for batch_idx, (x, y) in enumerate(
                 train_loader
             ):
@@ -209,9 +213,11 @@ def training_loop(profiling_bool, train_loader, model, optimizer, scaler, criter
                             y.reshape(-1)
                         )
 
-                    logging_loss = loss.item() * y.numel()
+                    loss = loss *y.numel()
+                    logging_loss = loss.detach()
+                    
                     loss = (
-                        loss * y.numel() /
+                        loss /
                         group_tokens
                     )
 
@@ -238,9 +244,11 @@ def training_loop(profiling_bool, train_loader, model, optimizer, scaler, criter
                                 ),
                                 y.reshape(-1)
                             )
-                        logging_loss = loss.item() * y.numel()
+                        loss = loss * y.numel()
+                        logging_loss = loss.detach()
+
                         loss = (
-                            loss * y.numel() /
+                            loss /
                             group_tokens
                         )
 
@@ -283,12 +291,12 @@ def training_loop(profiling_bool, train_loader, model, optimizer, scaler, criter
                         set_to_none=True
                     )
                     global_step += 1
-                    torch.cuda.synchronize()
                     elapsed = time.time() - start_time
+                    if global_step % 100 == 0:
+                        torch.cuda.synchronize()
+                        elapsed = time.time() - start_time
                     tokens_per_sec = int(epoch_tokens / elapsed)
-
-                    if global_step % 100 == 0 and rank == 0:
-
+                    if global_step % 100 == 0:
                         print(
                             f"Step {global_step:,} | "
                             f"LR {lr:.2e}"
@@ -644,7 +652,7 @@ if __name__ == "__main__":
         epoch_tokens = 0
         batch_tokens = 0
 
-        total_loss = 0.0
+        total_loss = torch.tensor(0.0, dtype=torch.float64).to(device)
         torch.cuda.synchronize()
         start_time = time.time()
         optimizer.zero_grad(
@@ -667,11 +675,9 @@ if __name__ == "__main__":
             p = None
             total_loss, epoch_tokens, tokens_seen, global_step, tokens_per_sec = training_loop(False, train_loader, model, optimizer, scaler, criterion, device, mask, train_sampler, p, epoch_tokens, tokens_seen, total_loss, global_step, start_time, total_optimizer_steps, world_size, rank, use_amp)
 
-        stats = torch.tensor(
-            [total_loss, epoch_tokens],
-            dtype=torch.float64,
-            device=device
-        )
+        epoch_tokens = torch.tensor(epoch_tokens, dtype=torch.float64).to(device)
+
+        stats = torch.stack([total_loss, epoch_tokens])
 
         dist.all_reduce(
             stats,
@@ -681,7 +687,7 @@ if __name__ == "__main__":
         train_loss = (
             stats[0] /
             stats[1]
-        )
+        ).item()
 
         elapsed = time.time() - start_time
 
