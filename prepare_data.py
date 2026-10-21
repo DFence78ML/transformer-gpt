@@ -12,9 +12,9 @@ from collections import defaultdict
 SEED = 42
 
 RAW_FILE =[
-    #Path("data/raw/books/tiny_input.txt"),
+    Path("data/raw/books/tiny_input.txt"),
     #Path("data/raw/books/duplicate_test.txt"),
-    Path("data/raw/books/minhash_benchmark.txt")
+    #Path("data/raw/books/minhash_benchmark.txt")
 ]
 
 OUTPUT_DIR = Path(

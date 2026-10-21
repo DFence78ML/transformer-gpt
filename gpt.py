@@ -48,7 +48,7 @@ class RoPE(nn.Module):
         self.register_buffer("cos_angles", cos_angles)
         self.register_buffer("sin_angles", sin_angles)
 
-    def forward(self, x):
+    def forward(self, x, start_pos = 0):
         batch, heads, seq_len, d_k = x.shape
         x_pairs = x.view(
             batch,
@@ -58,8 +58,10 @@ class RoPE(nn.Module):
             2
         )
 
-        cos_squeeze = self.cos_angles[:seq_len].unsqueeze(0).unsqueeze(0)
-        sin_squeeze = self.sin_angles[:seq_len].unsqueeze(0).unsqueeze(0)
+        end_pos = start_pos + seq_len
+
+        cos_squeeze = self.cos_angles[start_pos:end_pos].unsqueeze(0).unsqueeze(0)
+        sin_squeeze = self.sin_angles[start_pos:end_pos].unsqueeze(0).unsqueeze(0)
 
         x0 = x_pairs[..., 0]
         x1 = x_pairs[..., 1]
@@ -109,17 +111,30 @@ class MultiHeadAttentionBlock(nn.Module):
 #
         #return (attention_scores @ value), attention_scores
     
-    def forward(self, q,k,v, mask, dropout):
+    def forward(self, q,k,v, mask, dropout,
+                past_kv=None,
+                use_cache = False,
+                start_pos = 0):
         query = self.w_q(q)
-        key = self.w_k(k)
-        value = self.w_v(v)
+        new_key = self.w_k(k)
+        new_value = self.w_v(v)
 
         query = query.view(query.shape[0], query.shape[1], self.h, self.d_k).transpose(1,2)
-        key = key.view(key.shape[0], key.shape[1], self.h, self.d_k).transpose(1,2)
-        value = value.view(value.shape[0], value.shape[1], self.h, self.d_k).transpose(1,2)
+        new_key = new_key.view(new_key.shape[0], new_key.shape[1], self.h, self.d_k).transpose(1,2)
+        new_value = new_value.view(new_value.shape[0], new_value.shape[1], self.h, self.d_k).transpose(1,2)
 
-        query = self.rope(query)
-        key = self.rope(key)
+        query = self.rope(query, start_pos)
+        new_key = self.rope(new_key, start_pos)
+
+        if past_kv != None:
+            past_key, past_value = past_kv
+
+            key = torch.concat([past_key, new_key], dim=-2)
+            value = torch.concat([past_value, new_value], dim=-2)
+        else:
+            key = new_key
+            value = new_value
+
         if self.training:
             pass
         else:
@@ -128,8 +143,10 @@ class MultiHeadAttentionBlock(nn.Module):
         x = MultiHeadAttentionBlock.attention(query, key, value, mask, dropout)
 
         x = x.transpose(1, 2).contiguous().view(x.shape[0], -1, self.h * self.d_k)
-
-        return self.w_o(x)
+        if use_cache:
+            return self.w_o(x), (key,value)
+        else:
+            return self.w_o(x)
     
 class RMSNorm(nn.Module):
     def __init__(self, d_model: int, eps: float = 10**-6):
@@ -159,10 +176,29 @@ class DecoderBlock(nn.Module):
         self.dropout = dropout
         self.residual_connections = nn.ModuleList([ResidualConnection(dropout, d_model) for _ in range(2)])
 
-    def forward(self, x, mask):
-        x = self.residual_connections[0](x, lambda x: self.self_attention_block(x,x,x, mask, self.dropout))
+    def forward(self, x, mask, past_kv = None, use_cache = False, start_pos = 0):
+        if use_cache:
+            norm_x = self.residual_connections[0].norm(x)
+
+            attention_out, present_kv = self.self_attention_block.forward(
+                norm_x,
+                norm_x,
+                norm_x,
+                mask,
+                past_kv=past_kv,
+                use_cache=use_cache,
+                start_pos=start_pos,
+                dropout=self.dropout
+            )
+
+            x = x + self.residual_connections[0].dropout(attention_out)
+        else:
+            x = self.residual_connections[0](x, lambda x: self.self_attention_block(x,x,x, mask, self.dropout))
         x = self.residual_connections[1](x, self.feed_forward_block)
-        return x
+        if use_cache == True:
+            return x, present_kv
+        else:
+            return x
 
 class Decoder(nn.Module):
     def __init__(self, layers: nn.ModuleList, d_model):
@@ -170,10 +206,36 @@ class Decoder(nn.Module):
         self.layers = layers
         self.norm = RMSNorm(d_model)
 
-    def forward(self, x, mask):
-        for layer in self.layers:
-            x = layer(x, mask)
-        return self.norm(x)
+    def forward(self, x, mask,
+                past_key_values = None,
+                use_cache = False,
+                start_pos = 0):
+        new_key_values = []
+
+        for i, layer in enumerate(self.layers):
+            if past_key_values is None:
+                past_kv = None
+            else:
+                past_kv = past_key_values[i]
+
+            if use_cache:
+                x, present_kv = layer(
+                    x,
+                    mask,
+                    past_kv=past_kv,
+                    use_cache=True,
+                    start_pos=start_pos
+                )
+                new_key_values.append(present_kv)
+            else:
+                x = layer(x, mask)
+
+        x = self.norm(x)
+
+        if use_cache:
+            return x, new_key_values
+
+        return x
 
 class ProjectionLayer(nn.Module):
     def __init__(self, d_model: int, vocab_size: int):
@@ -191,12 +253,18 @@ class Transformer(nn.Module):
         self.embedding = embed
         self.projection_layer = projection_layer
 
-    def forward(self, x, mask):
+    def forward(self, x, mask, past_key_values = None, use_cache=False, start_pos = 0):
         x = self.embedding(x)
-        x = self.decoder(x, mask)
+        if use_cache:
+            x, present_key_values = self.decoder(x,mask, past_key_values, use_cache=True, start_pos=start_pos)
+        else:
+            x = self.decoder(x, mask)
         logits = self.projection_layer(x)
 
-        return logits
+        if use_cache:
+            return logits, present_key_values
+        else:
+            return logits
     
 def build_transformer(vocab_size: int, seq_len: int, d_model: int=config.modelconfig["d_model"], N: int=config.modelconfig["layers"], h: int=config.modelconfig["heads"], dropout: float=config.modelconfig["dropout"], d_ff: int=config.modelconfig["d_ff"]) -> Transformer:
     embed = InputEmbeddings(d_model, vocab_size)
@@ -235,6 +303,7 @@ if __name__ == "__main__":
     seq_len = 32
     d_k = 64
     epochs = 300
+    use_cache = False
 
     x = torch.randint(
         0,
@@ -262,10 +331,14 @@ if __name__ == "__main__":
     for i in range(epochs):
         tran.train()
         optimizer.zero_grad()
-        y = tran(x,mask)
-        logits = y.reshape(
+        y = tran(x,mask, use_cache)
+        if use_cache:
+            logits, present_key_values = y
+        else:
+            logits = tran(x,mask)
+        logits = logits.reshape(
             -1,
-            y.size(-1)
+            logits.size(-1)
         )
         loss = criterion(logits,targets)
         loss.backward()
