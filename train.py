@@ -37,6 +37,12 @@ NUM_WORKERS = config.num_workers
 PROFILE_EPOCH = 0
 PROFILING_BOOL = False
 
+def debug_checkpoint(message):
+    print(
+        f"[Rank {rank}] {time.strftime('%H:%M:%S')} {message}",
+        flush=True
+    )
+
 def get_lr(step, total_steps):
 
     if step < WARMUP_STEPS:
@@ -152,6 +158,8 @@ def training_loop(profiling_bool, train_loader, model, optimizer, scaler, criter
             for batch_idx, (x, y) in enumerate(
                 train_loader
             ):
+                if batch_idx == 0 and rank == 0:
+                    debug_checkpoint("First batch received")
                 is_update_step = (
                     (batch_idx + 1)
                     % GRAD_ACCUM_STEPS == 0
@@ -190,6 +198,8 @@ def training_loop(profiling_bool, train_loader, model, optimizer, scaler, criter
                     device,
                     non_blocking=True
                 )
+                if batch_idx == 0 and rank == 0:
+                    debug_checkpoint("Batch gone to GPU")
 
                 batch_tokens = (x.size(0) * x.size(1))
                 epoch_tokens += batch_tokens
@@ -237,6 +247,9 @@ def training_loop(profiling_bool, train_loader, model, optimizer, scaler, criter
                                 mask
                             )
 
+                            if batch_idx == 0 and rank == 0:
+                                debug_checkpoint("Forward pass")
+
                             loss = criterion(
                                 logits.reshape(
                                     -1,
@@ -258,6 +271,9 @@ def training_loop(profiling_bool, train_loader, model, optimizer, scaler, criter
                         ).backward()
 
                 total_loss += logging_loss
+
+                if batch_idx == 0 and rank == 0:
+                    debug_checkpoint("Back pass done")
 
 
                 if is_update_step or is_last_batch:
@@ -286,6 +302,8 @@ def training_loop(profiling_bool, train_loader, model, optimizer, scaler, criter
 
                     scaler.update()
 
+                    if batch_idx == 0 and rank == 0:
+                        debug_checkpoint("First optimizer step")
 
                     optimizer.zero_grad(
                         set_to_none=True
