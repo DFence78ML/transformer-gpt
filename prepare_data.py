@@ -8,11 +8,13 @@ from itertools import islice
 import time
 import numpy as np
 from collections import defaultdict
+import blake3
 
 SEED = 42
 
 RAW_FILE =[
-    Path("data/raw/books/tiny_input.txt"),
+    Path("data/raw/books/OpenWebText.txt")
+    #Path("data/raw/books/tiny_input.txt"),
     #Path("data/raw/books/duplicate_test.txt"),
     #Path("data/raw/books/minhash_benchmark.txt")
 ]
@@ -54,6 +56,10 @@ assert int(HASH_FUNC_NUM / (BANDS * ROWS)) == 1
 SIM_THRESH = 0.8
 
 MAX_STORIES = None
+
+COMPLEX = False
+
+FLUSH = 1000
 
 p = 2147483647
 
@@ -229,12 +235,14 @@ def exact_near_duplicates(shingles):
 
 def deduplicate(story, seen_hashes):
         encoded_story = story.encode(encoding = "utf-8")
-        story_hash = hashlib.sha256(encoded_story).digest()
+        hasher = blake3.blake3()
+        hasher.update(encoded_story)
+        story_hash = hasher.digest()
         if story_hash not in seen_hashes:
             seen_hashes.add(story_hash)
-            return story
+            return story, story_hash
         else:
-            return None 
+            return None, story_hash
 
 def emptycheck(story):
     if story == "":
@@ -282,23 +290,23 @@ def read_stories(issues):
             encoding="utf-8"
         ) as f:
 
-            buffer = ""
+            chunks = []
 
             for line in f:
 
-                buffer += line
-                while SEPARATOR in buffer:
+                chunks.append(line)
+                if SEPARATOR in line:
+                    story = chunks[:-1]
+                    story = "".join(story)
 
-                    story, buffer = (
-                        buffer.split(
-                            SEPARATOR,
-                            1
-                        )
-                    )
-
+                    
+                    #print(story)
+                    
                     story = clean_text(
                         story
                     )
+
+                    chunks = []
 
                     issues["raw"] += 1
 
@@ -306,35 +314,15 @@ def read_stories(issues):
                     if empty:
                         issues["empty"] += 1
                     else:
-                        story = deduplicate(story, seen_hashes)
+                        story, story_hash = deduplicate(story, seen_hashes)
                         if story is not None:
                                 if len(story) >= MIN_CHARS:
-                                    yield story
                                     issues["retained"] += 1
+                                    yield story, story_hash
                                 else:
                                     issues["short"] +=1
                         elif story is None:
                             issues["duplicate"] += 1
-
-                        
-
-            buffer = clean_text(buffer)
-
-            empty = emptycheck(buffer)
-
-            if empty:
-                pass
-            else:
-                issues["raw"] += 1
-                buffer = deduplicate(buffer, seen_hashes)
-                if buffer is not None:
-                        if len(buffer) >= MIN_CHARS:
-                            issues["retained"] += 1
-                            yield buffer
-                        else:
-                            issues["short"]+=1
-                elif buffer is None:
-                    issues["duplicate"] += 1
 
 
 def prepare_data():
@@ -390,7 +378,7 @@ def prepare_data():
         start_time = time.time()
         size = {}
         parent = {}
-        for i, story in enumerate(
+        for i, story, story_hash in enumerate(
             islice(read_stories(issues), MAX_STORIES)
         ):
             position = documents_file.tell()
@@ -654,9 +642,205 @@ def prepare_data():
         f"Documents removed as near dupes: "
         f"{len(removed_ids)}"
     )
+def prepare_data_fast():
+    OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+    #OVERWRITE EACH RUN
+    random.seed(SEED)
+
+    temp_train = (
+        OUTPUT_DIR / "train_temp.txt"
+    )
+
+    temp_val = (
+        OUTPUT_DIR / "val_temp.txt"
+    )
+
+    train_count = 0
+    val_count = 0
+    issues = {
+        "duplicate":0,
+        "short":0,
+        "retained":0,
+        "raw":0,
+        "empty":0
+    } 
+
+    train_chars = 0
+    val_chars = 0
+
+    train_buffer = []
+    val_buffer = []
+
+    #Pass 1
+    #write properly
+    print("---------------------------")
+    print("PASS 1")
+    print("---------------------------")
+    with open(
+        temp_train,
+        "w",
+        encoding="utf-8"
+    ) as train_file, open(
+        temp_val,
+        "w",
+        encoding="utf-8"
+    ) as val_file:
+        train_write = train_file.write
+        val_write = val_file.write
+        start_time = time.time()
+        for i, story in enumerate(
+            islice(read_stories(issues), MAX_STORIES)
+        ):
+                story, story_hash = story
+                if ((i+1) % 100000 ) == 0:
+                    end_time = time.time()
+                    print(end_time - start_time)
+                    print(f"Processed {i+1} documents")
+                if story_hash[0] > 13:
+                    train_buffer.append(story)
+                    train_buffer.append("\n")
+                    train_buffer.append(SEPARATOR)
+                    train_buffer.append("\n")
+
+                    if len(train_buffer) >= FLUSH * 4:
+                        train_write("".join(train_buffer))
+                        train_buffer.clear()
+
+                    train_count += 1
+                    train_chars += len(story)
+
+                else:
+                    val_buffer.append(story)
+                    val_buffer.append("\n")
+                    val_buffer.append(SEPARATOR)
+                    val_buffer.append("\n")
+
+                    if len(val_buffer) >= FLUSH * 4:
+                        val_write("".join(val_buffer))
+                        val_buffer.clear()
+
+                    val_count += 1
+                    val_chars += len(story)
+    assert train_count > 0 and val_count > 0
+    assert train_chars > 0 and val_chars > 0
+    assert issues["retained"] - train_count - val_count == 0
+    assert issues["raw"] - train_count - val_count - issues["duplicate"]  - issues["empty"] - issues["short"]== 0
+    retained_after_all = train_count + val_count
+    train_average_chars_per_doc = train_chars // train_count
+    val_average_chars_per_doc = val_chars // val_count
+
+    temp_train.replace(TRAIN_FILE)
+    temp_val.replace(VAL_FILE)
+
+    stats = {
+
+        "train_documents":
+            train_count,
+
+        "validation_documents":
+            val_count,
+
+        "train_characters":
+            train_chars,
+
+        "validation_characters":
+            val_chars,
+
+        "total_characters":
+            train_chars + val_chars,
+
+        "duplicate_docs":
+        issues["duplicate"],
+
+        "short_docs":
+        issues["short"],
+
+        "raw_docs":
+        issues["raw"],
+
+        "val_average_chars_per_doc":
+        val_average_chars_per_doc,
+
+        "train_average_chars_per_doc":
+        train_average_chars_per_doc,
+
+        "Post de duplication":
+        retained_after_all
+    }
+    STATS_FILE.write_text(
+        json.dumps(
+            stats,
+            indent=4
+        ),
+        encoding="utf-8"
+    )
+
+    print()
+    print("Finished!")
+    print()
+    print(
+        f"Train stories: "
+        f"{train_count:,}"
+    )
+
+    print(
+        f"Validation stories: "
+        f"{val_count:,}"
+    )
+
+    print(
+        f"Train characters: "
+        f"{train_chars:,}"
+    )
+
+    print(
+        f"Validation characters: "
+        f"{val_chars:,}"
+    )
+
+    print(
+        f"Duplicate Docs: " 
+        f"{issues["duplicate"]:,}"
+    )
+
+    print(
+        f"Short docs: " 
+        f"{issues["short"]:,}"
+    )
+
+    print(
+        f"Empty docs: " 
+        f"{issues["empty"]:,}"
+    )
+
+    print(
+        f"Raw docs: " 
+        f"{issues["raw"]:,}"
+    )
+
+    print(
+        f"Average characters per train doc: " 
+        f"{train_average_chars_per_doc:,}"
+    )
+
+    print(
+        f"Average characters per val doc: " 
+        f"{val_average_chars_per_doc:,}"
+    )
+
+    print(
+        f"Post de duplication: "
+        f"{retained_after_all:,}"
+    )
 
 if __name__ == "__main__":
-    prepare_data()
+    if COMPLEX:
+        prepare_data()
+    else:
+        prepare_data_fast()
     """shingles = []
     issues = {
         "duplicate":0,

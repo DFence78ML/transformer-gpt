@@ -1,13 +1,13 @@
 {
-    "train_documents": 1709456,
-    "validation_documents": 89780,
-    "train_characters": 1514379298,
-    "validation_characters": 79597166,
-    "total_characters": 1593976464,
-    "duplicate_docs": 320241,
-    "short_docs": 12,
-    "raw_docs": 2119719,
-    "val_average_chars_per_doc": 886,
-    "train_average_chars_per_doc": 885,
-    "Post de duplication": 1799236
+    "train_documents": 5219989,
+    "validation_documents": 301831,
+    "train_characters": 25669317680,
+    "validation_characters": 1481143213,
+    "total_characters": 27150460893,
+    "duplicate_docs": 0,
+    "short_docs": 0,
+    "raw_docs": 5521820,
+    "val_average_chars_per_doc": 4907,
+    "train_average_chars_per_doc": 4917,
+    "Post de duplication": 5521820
 }
