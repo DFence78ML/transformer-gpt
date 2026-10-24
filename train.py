@@ -33,7 +33,7 @@ PATIENCE = 3
 tokens_seen = 0
 epoch_tokens = 0
 
-NUM_WORKERS = config.num_workers
+NUM_WORKERS = 0
 
 PROFILE_EPOCH = 0
 PROFILING_BOOL = False
@@ -726,7 +726,7 @@ if __name__ == "__main__":
         batch_size=BATCH_SIZE,
         sampler=resumable_sampler,
         num_workers=NUM_WORKERS,
-        persistent_workers=True,
+        persistent_workers= True if NUM_WORKERS > 0 else False,
         pin_memory=True
     )
     val_sampler = DistributedSampler(
@@ -743,7 +743,7 @@ if __name__ == "__main__":
         batch_size=BATCH_SIZE,
         sampler=val_sampler,
         num_workers=NUM_WORKERS,
-        persistent_workers=True,
+        persistent_workers=True if NUM_WORKERS > 0 else False,
         pin_memory=True
     )
 
