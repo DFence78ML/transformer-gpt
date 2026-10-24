@@ -702,7 +702,7 @@ if __name__ == "__main__":
         traindataset,
         num_replicas=world_size,
         rank=rank,
-        shuffle=True
+        shuffle=False
     )
 
     train_sampler.set_epoch(start_epoch)
@@ -751,6 +751,9 @@ if __name__ == "__main__":
             total_batches_per_epoch / GRAD_ACCUM_STEPS
         )
 
+
+    print("Dataset examples:", len(traindataset), flush=True)
+    print("NUM_WORKERS:", NUM_WORKERS, flush=True)
     
     if load == "no":
         total_optimizer_steps = (
