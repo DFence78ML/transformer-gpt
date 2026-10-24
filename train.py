@@ -11,7 +11,8 @@ from torch.utils.data.distributed import DistributedSampler
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.profiler import profile, ProfilerActivity
-
+import itertools
+from torch.utils.data import Sampler
 from torch.utils.data import DataLoader
 
 SEQ_LEN = config.modelconfig["seq_len"]
@@ -153,10 +154,11 @@ def trace_handler(p):
         print(output)
         p.export_chrome_trace(f"/kaggle/working/rank_{rank}_trace_{str(p.step_num)}.json")
 
-def training_loop(profiling_bool, train_loader, model, optimizer, scaler, criterion, device, mask, train_sampler, p, epoch_tokens, tokens_seen, total_loss, global_step, start_time, total_optimizer_steps, world_size, rank, use_amp):
+def training_loop(profiling_bool, train_loader, model, optimizer, scaler, criterion, device, mask, train_sampler, p, epoch_tokens, tokens_seen, total_loss, global_step, start_time, total_optimizer_steps, world_size, rank, use_amp, next_batch_idx, epoch, best_val_loss, patience_counter, raw_model, total_batches_per_epoch):
             tokens_per_sec = 0.0
             for batch_idx, (x, y) in enumerate(
-                train_loader
+                train_loader,
+                next_batch_idx
             ):
                 if batch_idx == 0 and rank == 0:
                     debug_checkpoint("First batch received")
@@ -167,7 +169,7 @@ def training_loop(profiling_bool, train_loader, model, optimizer, scaler, criter
 
                 is_last_batch = (
                     batch_idx + 1
-                    == len(train_loader)
+                    == total_batches_per_epoch
                 )
 
                 group_start = (
@@ -177,7 +179,7 @@ def training_loop(profiling_bool, train_loader, model, optimizer, scaler, criter
                 if batch_idx == group_start:
                     group_end = min(
                         group_start + GRAD_ACCUM_STEPS,
-                        len(train_loader)
+                        total_batches_per_epoch
                     )
 
                     group_tokens = sum(
@@ -321,10 +323,162 @@ def training_loop(profiling_bool, train_loader, model, optimizer, scaler, criter
                             f"Time: {elapsed}"
                             f"Tokens per sec {tokens_per_sec}"
                         )
+                    next_batch_idx = batch_idx + 1
+                    if global_step % 100 == 0:
+                        gathered_cpu_rng, gathered_cuda_rng = cpu_cuda_rng_gather(rank)
+                        if rank == 0:
+                            mid_train_checkpoint(epoch, global_step, raw_model, optimizer, scaler, best_val_loss, patience_counter, tokens_seen, total_optimizer_steps, gathered_cpu_rng, gathered_cuda_rng, next_batch_idx)
                 if profiling_bool:
                     p.step()
             return total_loss, epoch_tokens, tokens_seen, global_step, tokens_per_sec
 
+def mid_train_checkpoint(epoch, global_step, raw_model, optimizer, scaler, best_val_loss, patience_counter, tokens_seen, total_optimizer_steps, gathered_cpu_rng, gathered_cuda_rng, next_batch_idx):
+            checkpoint = {
+
+                "epoch": epoch,
+
+                "global_step": global_step,
+
+                "model_state_dict":
+                    raw_model.state_dict(),
+
+                "optimizer_state_dict":
+                    optimizer.state_dict(),
+
+                "scaler_state_dict":
+                    scaler.state_dict(),
+
+                "best_val_loss":
+                    best_val_loss,
+
+                "patience_counter":
+                    patience_counter,
+
+                "tokens_seen": 
+                tokens_seen,
+
+                "batch_size":
+                BATCH_SIZE,
+
+                "grad_accum_steps":
+                GRAD_ACCUM_STEPS,
+
+                "max_lr":
+                MAX_LR,
+
+                "min_lr":
+                MIN_LR,
+
+                "warmup_steps":
+                WARMUP_STEPS,
+
+                "weight_decay":
+                WEIGHT_DECAY,
+
+                "total_optimizer_steps":
+                total_optimizer_steps,
+
+                "config": {
+                    "seq_len":
+                    SEQ_LEN,
+
+                    "d_ff":
+                    config.modelconfig["d_ff"],
+
+                    "d_model":
+                    config.modelconfig["d_model"],
+
+                    "heads":
+                    config.modelconfig["heads"],
+
+                    "layers":
+                    config.modelconfig["layers"],
+
+                    "vocab_size":
+                    config.modelconfig["vocab_size"],
+
+                    "dropout":
+                    config.modelconfig["dropout"]
+                },
+
+                "cpu_rng_state":
+                gathered_cpu_rng,
+    
+                "cuda_rng_state":
+                gathered_cuda_rng,
+
+                "next_batch_idx":
+                next_batch_idx
+            }
+
+
+            torch.save(
+                checkpoint,
+                "/kaggle/working/latest.pt"
+            )
+def cpu_cuda_rng_gather(rank):
+        local_cuda_rng = torch.cuda.get_rng_state()
+        local_cpu_rng = torch.get_rng_state()
+
+        local_cpu_rng_cuda = local_cpu_rng.to(device)
+
+        if rank == 0:
+            gathered_cuda_rng = [
+                torch.empty_like(local_cuda_rng).to(device)
+                for _ in range(world_size)
+            ]
+        else:
+            gathered_cuda_rng = None
+
+        dist.gather(
+            local_cuda_rng.to(device),
+            gather_list=gathered_cuda_rng,
+            dst=0
+        )
+
+        if rank == 0:
+            gathered_cpu_rng = [
+                torch.empty_like(local_cpu_rng_cuda)
+                for _ in range(world_size)
+            ]
+        else:
+            gathered_cpu_rng = None
+
+        dist.gather(
+            local_cpu_rng_cuda,
+            gather_list=gathered_cpu_rng,
+            dst=0
+        )
+
+        if rank == 0:
+            gathered_cuda_rng = [
+                state.cpu()
+                for state in gathered_cuda_rng
+            ]
+
+            gathered_cpu_rng = [
+                state.cpu()
+                for state in gathered_cpu_rng
+            ]
+        return gathered_cpu_rng, gathered_cuda_rng
+
+class ResumableSampler(Sampler):
+    def __init__(self, sampler, start_batch, batch_size):
+        self.sampler = sampler
+        self.start_sample = start_batch * batch_size
+
+    def __iter__(self):
+        return itertools.islice(
+            iter(self.sampler),
+            self.start_sample,
+            None
+        )
+
+    def __len__(self):
+        return max(
+            0,
+            len(self.sampler) - self.start_sample
+        )
 if __name__ == "__main__":
     traindataset = dataset.GPTDataset(
         "/kaggle/input/datasets/preetsidhu20/tokenized-files/train.bin",
@@ -383,6 +537,7 @@ if __name__ == "__main__":
         optimizer_steps_per_epoch = 0
         MAX_LR = config.max_lr
         MIN_LR = config.min_lr
+        next_batch_idx = 0
 
     else:
 
@@ -395,7 +550,6 @@ if __name__ == "__main__":
                 "latest.pt",
                 map_location="cpu"
             )
-
         else:
 
             checkpoint = torch.load(
@@ -430,11 +584,6 @@ if __name__ == "__main__":
                 if torch.is_tensor(value):
 
                     state[key] = value.to(device)
-
-
-        start_epoch = (
-            checkpoint["epoch"] + 1
-        )
 
         best_val_loss = checkpoint.get(
             "best_val_loss",
@@ -474,6 +623,17 @@ if __name__ == "__main__":
             "max_lr",
             config.max_lr
                 )
+
+        next_batch_idx = checkpoint.get(
+            "next_batch_idx",
+            0
+        )
+
+        if next_batch_idx > 0:
+            start_epoch = checkpoint["epoch"]
+        else:
+            start_epoch = checkpoint["epoch"] + 1
+
         if rank == 0:
             cuda_rng_state = checkpoint.get(
                     "cuda_rng_state",
@@ -545,10 +705,26 @@ if __name__ == "__main__":
         shuffle=True
     )
 
+    train_sampler.set_epoch(start_epoch)
+
+    total_batches_per_epoch = math.ceil(
+        len(train_sampler) / BATCH_SIZE
+    )
+
+    resumable_sampler = ResumableSampler(
+        train_sampler,
+        next_batch_idx,
+        BATCH_SIZE
+    )
+
+    resumable_sampler.start_sample = (
+        next_batch_idx * BATCH_SIZE
+    )
+
     train_loader = DataLoader(
         traindataset,
         batch_size=BATCH_SIZE,
-        sampler=train_sampler,
+        sampler=resumable_sampler,
         num_workers=NUM_WORKERS,
         persistent_workers=True,
         pin_memory=True
@@ -560,6 +736,8 @@ if __name__ == "__main__":
             shuffle=False
     )
 
+    val_sampler.set_epoch(start_epoch)
+
     val_loader = DataLoader(
         valdataset,
         batch_size=BATCH_SIZE,
@@ -570,7 +748,7 @@ if __name__ == "__main__":
     )
 
     optimizer_steps_per_epoch = math.ceil(
-            len(train_loader) / GRAD_ACCUM_STEPS
+            total_batches_per_epoch / GRAD_ACCUM_STEPS
         )
 
     
@@ -688,10 +866,10 @@ if __name__ == "__main__":
             schedule=torch.profiler.schedule(wait=2, warmup=2, active=5, repeat=1),
             on_trace_ready=trace_handler,
                 ) as p:
-                total_loss, epoch_tokens, tokens_seen, global_step, tokens_per_sec = training_loop(PROFILING_BOOL, train_loader, model, optimizer, scaler, criterion, device, mask, train_sampler, p, epoch_tokens, tokens_seen, total_loss, global_step, start_time, total_optimizer_steps, world_size, rank, use_amp)
+                total_loss, epoch_tokens, tokens_seen, global_step, tokens_per_sec = training_loop(PROFILING_BOOL, train_loader, model, optimizer, scaler, criterion, device, mask, train_sampler, p, epoch_tokens, tokens_seen, total_loss, global_step, start_time, total_optimizer_steps, world_size, rank, use_amp, next_batch_idx, epoch, best_val_loss, patience_counter, raw_model, total_batches_per_epoch)
         else:
             p = None
-            total_loss, epoch_tokens, tokens_seen, global_step, tokens_per_sec = training_loop(False, train_loader, model, optimizer, scaler, criterion, device, mask, train_sampler, p, epoch_tokens, tokens_seen, total_loss, global_step, start_time, total_optimizer_steps, world_size, rank, use_amp)
+            total_loss, epoch_tokens, tokens_seen, global_step, tokens_per_sec = training_loop(False, train_loader, model, optimizer, scaler, criterion, device, mask, train_sampler, p, epoch_tokens, tokens_seen, total_loss, global_step, start_time, total_optimizer_steps, world_size, rank, use_amp, next_batch_idx, epoch, best_val_loss, patience_counter, raw_model, total_batches_per_epoch)
 
         epoch_tokens = torch.tensor(epoch_tokens, dtype=torch.float64).to(device)
 
@@ -721,49 +899,8 @@ if __name__ == "__main__":
             min(val_loss, 20)
         )
 
-        local_cuda_rng = torch.cuda.get_rng_state()
-        local_cpu_rng = torch.get_rng_state()
-
-        local_cpu_rng_cuda = local_cpu_rng.to(device)
-
-        if rank == 0:
-            gathered_cuda_rng = [
-                torch.empty_like(local_cuda_rng).to(device)
-                for _ in range(world_size)
-            ]
-        else:
-            gathered_cuda_rng = None
-
-        dist.gather(
-            local_cuda_rng.to(device),
-            gather_list=gathered_cuda_rng,
-            dst=0
-        )
-
-        if rank == 0:
-            gathered_cpu_rng = [
-                torch.empty_like(local_cpu_rng_cuda)
-                for _ in range(world_size)
-            ]
-        else:
-            gathered_cpu_rng = None
-
-        dist.gather(
-            local_cpu_rng_cuda,
-            gather_list=gathered_cpu_rng,
-            dst=0
-        )
-
-        if rank == 0:
-            gathered_cuda_rng = [
-                state.cpu()
-                for state in gathered_cuda_rng
-            ]
-
-            gathered_cpu_rng = [
-                state.cpu()
-                for state in gathered_cpu_rng
-            ]
+        gathered_cpu_rng, gathered_cuda_rng = cpu_cuda_rng_gather(rank)
+        next_batch_idx = 0
 
         if (rank == 0):
             print()
@@ -794,91 +931,87 @@ if __name__ == "__main__":
                     f"Patience "
                     f"{patience_counter}/{PATIENCE}"
                 )
-
-            checkpoint = {
-
-                "epoch": epoch,
-
-                "global_step": global_step,
-
-                "model_state_dict":
-                    raw_model.state_dict(),
-
-                "optimizer_state_dict":
-                    optimizer.state_dict(),
-
-                "scaler_state_dict":
-                    scaler.state_dict(),
-
-                "best_val_loss":
-                    best_val_loss,
-
-                "patience_counter":
-                    patience_counter,
-
-                "tokens_seen": 
-                tokens_seen,
-
-                "batch_size":
-                BATCH_SIZE,
-
-                "grad_accum_steps":
-                GRAD_ACCUM_STEPS,
-
-                "max_lr":
-                MAX_LR,
-
-                "min_lr":
-                MIN_LR,
-
-                "warmup_steps":
-                WARMUP_STEPS,
-
-                "weight_decay":
-                WEIGHT_DECAY,
-
-                "total_optimizer_steps":
-                total_optimizer_steps,
-
-                "config": {
-                    "seq_len":
-                    SEQ_LEN,
-
-                    "d_ff":
-                    config.modelconfig["d_ff"],
-
-                    "d_model":
-                    config.modelconfig["d_model"],
-
-                    "heads":
-                    config.modelconfig["heads"],
-
-                    "layers":
-                    config.modelconfig["layers"],
-
-                    "vocab_size":
-                    config.modelconfig["vocab_size"],
-
-                    "dropout":
-                    config.modelconfig["dropout"]
-                },
-
-                "cpu_rng_state":
-                gathered_cpu_rng,
-    
-                "cuda_rng_state":
-                gathered_cuda_rng
-
-            }
-
-
-            torch.save(
-                checkpoint,
-                "/kaggle/working/latest.pt"
-            )
-
+            
+            mid_train_checkpoint(epoch, global_step, raw_model, optimizer, scaler, best_val_loss, patience_counter, tokens_seen, total_optimizer_steps, gathered_cpu_rng, gathered_cuda_rng, next_batch_idx)
 
             if is_best:
+                checkpoint = {
+
+                    "epoch": epoch,
+
+                    "global_step": global_step,
+
+                    "model_state_dict":
+                        raw_model.state_dict(),
+
+                    "optimizer_state_dict":
+                        optimizer.state_dict(),
+
+                    "scaler_state_dict":
+                        scaler.state_dict(),
+
+                    "best_val_loss":
+                        best_val_loss,
+
+                    "patience_counter":
+                        patience_counter,
+
+                    "tokens_seen": 
+                    tokens_seen,
+
+                    "batch_size":
+                    BATCH_SIZE,
+
+                    "grad_accum_steps":
+                    GRAD_ACCUM_STEPS,
+
+                    "max_lr":
+                    MAX_LR,
+
+                    "min_lr":
+                    MIN_LR,
+
+                    "warmup_steps":
+                    WARMUP_STEPS,
+
+                    "weight_decay":
+                    WEIGHT_DECAY,
+
+                    "total_optimizer_steps":
+                    total_optimizer_steps,
+
+                    "config": {
+                        "seq_len":
+                        SEQ_LEN,
+
+                        "d_ff":
+                        config.modelconfig["d_ff"],
+
+                        "d_model":
+                        config.modelconfig["d_model"],
+
+                        "heads":
+                        config.modelconfig["heads"],
+
+                        "layers":
+                        config.modelconfig["layers"],
+
+                        "vocab_size":
+                        config.modelconfig["vocab_size"],
+
+                        "dropout":
+                        config.modelconfig["dropout"]
+                    },
+
+                    "cpu_rng_state":
+                    gathered_cpu_rng,
+        
+                    "cuda_rng_state":
+                    gathered_cuda_rng,
+
+                    "next_batch_idx":
+                    next_batch_idx
+                }
 
                 torch.save(
                     checkpoint,
