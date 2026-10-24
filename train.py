@@ -33,7 +33,7 @@ PATIENCE = 3
 tokens_seen = 0
 epoch_tokens = 0
 
-NUM_WORKERS = config.num_workers
+NUM_WORKERS = 0
 
 PROFILE_EPOCH = 0
 PROFILING_BOOL = False
