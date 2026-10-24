@@ -14,6 +14,7 @@ from torch.profiler import profile, ProfilerActivity
 import itertools
 from torch.utils.data import Sampler
 from torch.utils.data import DataLoader
+import random
 
 SEQ_LEN = config.modelconfig["seq_len"]
 
@@ -37,6 +38,8 @@ NUM_WORKERS = 0
 
 PROFILE_EPOCH = 0
 PROFILING_BOOL = False
+
+SEED = 42
 
 def debug_checkpoint(message):
     print(
@@ -479,6 +482,40 @@ class ResumableSampler(Sampler):
             0,
             len(self.sampler) - self.start_sample
         )
+class BlockDistributedSampler(Sampler):
+    def __init__(self, dataset, num_replicas, rank, block_size = 65536, seed=SEED):
+        if num_replicas < 1:
+            raise ValueError("num replicas gotta be pos")
+        if not 0 <= rank < num_replicas:
+            raise ValueError("more ranks than world size")
+        self.dataset = dataset
+        self.num_replicas = num_replicas
+        self.rank = rank
+        self.block_size = block_size
+        self.seed = seed
+        self.num_blocks = math.ceil(len(self.dataset)/self.block_size)
+        self.epoch = 0
+
+    def __iter__(self):
+        rand = random.Random(self.seed + self.epoch)
+        ids = list(range(self.num_blocks))
+        rand.shuffle(ids)
+        for block_id in ids:
+            start_id = block_id * self.block_size
+            end_id = min((block_id + 1) * self.block_size, len(self.dataset))
+            block_indices = list(range(start_id, end_id))
+            rand.shuffle(block_indices)
+            out = block_indices[self.rank:len(block_indices):self.num_replicas]
+            yield from out
+
+    def __len__(self):
+        indices_per_rank = len(self.dataset) / self.num_replicas
+        return int(indices_per_rank)
+
+    
+    def set_epoch(self, epoch):
+        self.epoch = epoch
+
 if __name__ == "__main__":
     traindataset = dataset.GPTDataset(
         "/kaggle/input/datasets/preetsidhu20/tokenized-files/train.bin",
@@ -698,11 +735,11 @@ if __name__ == "__main__":
         f"Device {device}"
     )
 
-    train_sampler = DistributedSampler(
+    train_sampler = BlockDistributedSampler(
         traindataset,
         num_replicas=world_size,
         rank=rank,
-        shuffle=False
+        seed = SEED
     )
 
     train_sampler.set_epoch(start_epoch)
@@ -845,6 +882,9 @@ if __name__ == "__main__":
         start_epoch,
         MAX_EPOCHS
     ):
+        resumable_sampler.start_sample = (
+            next_batch_idx * BATCH_SIZE
+        )
         train_sampler.set_epoch(epoch)
 
         model.train()
