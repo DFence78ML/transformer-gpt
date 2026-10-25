@@ -699,7 +699,7 @@ if __name__ == "__main__":
         )
 
         torch.cuda.set_rng_state(
-            cuda_recieved,
+            cuda_recieved.cpu(),
             device=device
         )
 
